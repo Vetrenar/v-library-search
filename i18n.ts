@@ -214,7 +214,7 @@ export const TRANSLATIONS: Record<string, { en: string; ru: string }> = {
     'pdf.notice.outlineInserted':     { en: 'Outline inserted into the note.',                 ru: 'Оглавление вставлено в заметку.' },
     'pdf.notice.outlineCopied':       { en: 'Outline copied to clipboard.',                    ru: 'Оглавление скопировано в буфер обмена.' },
     'pdf.notice.noOutlineBookmarks':  { en: 'This PDF has no embedded outline (bookmarks).',   ru: 'В этом PDF нет встроенных закладок (оглавления).' },
-    'pdf.notice.noLinkedPdf':         { en: 'No linked PDF in the \"{{prop}}\" property.',   ru: 'Нет ссылки на PDF в свойстве «{{prop}}».' },
+    'pdf.notice.noLinkedPdf':         { en: 'No linked PDF in the "{{prop}}" property.',   ru: 'Нет ссылки на PDF в свойстве «{{prop}}».' },
     'pdf.notice.updatedOutline':      { en: 'Updated outline: {{name}}',                       ru: 'Оглавление обновлено: {{name}}' },
     'pdf.notice.createdAndInserted':  { en: 'Created card and inserted outline: {{name}}',     ru: 'Создана карточка и вставлено оглавление: {{name}}' },
     'pdf.notice.failed':              { en: 'PDF outline failed (see console).',                ru: 'Ошибка оглавления PDF (подробности в консоли).' },

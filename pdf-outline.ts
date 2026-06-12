@@ -123,8 +123,8 @@ from the `vars` map. Unknown tokens become ''. Never throws; no eval. */
 function fillTemplate(tpl: string, vars: Placeholders): string {
     if (!tpl) return tpl;
     return tpl
-        .replace(/{{\s*([\w.]+)\s*}}/g, (_m, key) => vars[key] ?? '')
-        .replace(/{\s*(page|pageLabel|label|pageCount)\s*}/g, (_m, key) => vars[key] ?? '');
+        .replace(/{{\s*([\w.]+)\s*}}/g, (_m, key: string) => vars[key] ?? '')
+        .replace(/{\s*(page|pageLabel|label|pageCount)\s*}/g, (_m, key: string) => vars[key] ?? '');
 }
 /** Pre-computed card→PDF mapping to avoid O(NM) lookups in batch scans. */
 interface CardLookup {
@@ -288,20 +288,22 @@ export class PdfOutlineFeature {
     pickAndInsert() {
         const pdfs = this.allPdfs();
         if (!pdfs.length) { new Notice(t('pdf.notice.noPdfsInVault')); return; }
-        new PdfPickerModal(this.app, pdfs, async (pdf) => {
-            const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-            const sourcePath = view?.file?.path ?? '';
-            const out = await this.readPdfOutline(pdf);
-            if (!out.entries.length) { new Notice(t('pdf.notice.noOutline')); return; }
-            const base = this.looseBase();
-            const md = this.renderOutline(out, base, this.linkText(pdf, sourcePath), pdf) + '\n';
-            if (this.getSettings().output === 'cursor' && view && view.getMode() === 'source') {
-                view.editor.replaceSelection(md);
-                new Notice(t('pdf.notice.outlineInserted'));
-            } else {
-                await navigator.clipboard.writeText(md);
-                new Notice(t('pdf.notice.outlineCopied'));
-            }
+        new PdfPickerModal(this.app, pdfs, (pdf) => {
+            void (async () => {
+                const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+                const sourcePath = view?.file?.path ?? '';
+                const out = await this.readPdfOutline(pdf);
+                if (!out.entries.length) { new Notice(t('pdf.notice.noOutline')); return; }
+                const base = this.looseBase();
+                const md = this.renderOutline(out, base, this.linkText(pdf, sourcePath), pdf) + '\n';
+                if (this.getSettings().output === 'cursor' && view && view.getMode() === 'source') {
+                    view.editor.replaceSelection(md);
+                    new Notice(t('pdf.notice.outlineInserted'));
+                } else {
+                    await navigator.clipboard.writeText(md);
+                    new Notice(t('pdf.notice.outlineCopied'));
+                }
+            })();
         }).open();
     }
 
@@ -388,7 +390,7 @@ export class PdfOutlineFeature {
                 try { await this.extractToCard(pdfs[i], true); ok++; }
                 catch (e) { console.error('[PDF outline]', pdfs[i].path, e); }
                 // Yield every 4 PDFs to keep the UI responsive.
-                if (i % 4 === 3) await new Promise<void>(r => setTimeout(r, 0));
+                if (i % 4 === 3) await new Promise<void>(r => window.setTimeout(r, 0));
             }
         } finally {
             this.clearPdfIndexCache();
@@ -430,21 +432,21 @@ export class PdfOutlineFeature {
             return { entries: [], pageLabels: null, pageCount: 0 };
         }
 
-        let doc: any = null;
+        let doc: Record<string, unknown> | null = null;
         try {
             // Pass ArrayBuffer directly to PDF.js — avoids a 2× peak-memory spike.
             const data = await this.app.vault.readBinary(pdf);
-            doc = await pdfjsLib.getDocument({ data }).promise;
+            doc = await (pdfjsLib as Record<string, unknown>).getDocument({ data }).promise as Record<string, unknown>;
 
             const entries: OutlineEntry[] = [];
-            const tree = await doc.getOutline();
+            const tree = await (doc.getOutline as () => Promise<unknown[]>)();
             if (tree && tree.length) await this.flatten(doc, tree, 1, entries);
 
             let pageLabels: string[] | null = null;
             if (this.getSettings().usePageLabels) {
-                try { pageLabels = await doc.getPageLabels(); } catch { pageLabels = null; }
+                try { pageLabels = await (doc.getPageLabels as () => Promise<string[] | null>)(); } catch { pageLabels = null; }
             }
-            const pageCount: number = (typeof doc.numPages === 'number') ? doc.numPages : 0;
+            const pageCount: number = (typeof doc.numPages === 'number') ? doc.numPages as number : 0;
             return {  entries, pageLabels, pageCount };
         } catch (e) {
             console.error(`[PDF Outline] Failed to parse ${pdf.path}:`, e);
@@ -455,40 +457,42 @@ export class PdfOutlineFeature {
             // Without this, batch processing hundreds of PDFs will leak memory
             // until Obsidian's V8 heap is exhausted.
             if (doc) {
-                try { await doc.destroy?.(); } catch {}
+                try { if (typeof doc.destroy === 'function') await (doc.destroy as () => Promise<void>)(); } catch { /* no-op */ }
             }
         }
     }
 
     /** Iterative stack-based flattening — avoids call-stack overflow on deep outlines. */
-    private async flatten(doc: any, rootItems: any[], startDepth: number, acc: OutlineEntry[]) {
-        const stack: { item: any; depth: number }[] = rootItems
-            .slice().reverse().map(item => ({ item, depth: startDepth }));
+    private async flatten(doc: Record<string, unknown>, rootItems: unknown[], startDepth: number, acc: OutlineEntry[]) {
+        interface StackItem { item: Record<string, unknown>; depth: number }
+        const stack: StackItem[] = rootItems
+            .slice().reverse().map(item => ({ item: item as Record<string, unknown>, depth: startDepth }));
         while (stack.length) {
             const { item, depth } = stack.pop()!;
             if (!item || typeof item !== 'object') continue;
             acc.push({
                 depth,
-                title: (item.title ?? '').trim(),
-                pageIndex: await this.resolveDest(doc, item.dest),
+                title: ((item.title as string) ?? '').trim(),
+                pageIndex: await this.resolveDest(doc, item.dest as string | unknown[] | null),
             });
-            if (Array.isArray(item.items) && item.items.length) {
-                for (let i = item.items.length - 1; i >= 0; i--) {
-                    stack.push({ item: item.items[i], depth: depth + 1 });
+            const items = item.items as unknown[] | undefined;
+            if (Array.isArray(items) && items.length) {
+                for (let i = items.length - 1; i >= 0; i--) {
+                    stack.push({ item: items[i] as Record<string, unknown>, depth: depth + 1 });
                 }
             }
         }
     }
 
-    private async resolveDest(doc: any, dest: string | unknown[] | null): Promise<number | null> {
+    private async resolveDest(doc: Record<string, unknown>, dest: string | unknown[] | null): Promise<number | null> {
         try {
             if (dest == null) return null;
-            const explicit: any[] | null = Array.isArray(dest) ? dest : await doc.getDestination(dest);
+            const explicit: unknown[] | null = Array.isArray(dest) ? dest : await (doc.getDestination as (d: string) => Promise<unknown[] | null>)(dest as string);
             if (!explicit || !explicit.length) return null;
             const ref = explicit[0];
             if (ref == null) return null;
             if (typeof ref === 'number') return ref;          // rare: direct 0-based page
-            const pageIndex = await doc.getPageIndex(ref);
+            const pageIndex = await (doc.getPageIndex as (r: unknown) => Promise<number>)(ref);
             // Guard against undefined/null returns from getPageIndex
             return (typeof pageIndex === 'number') ? pageIndex : null;
         } catch { return null; }
@@ -627,14 +631,18 @@ export class PdfOutlineFeature {
     }
 
     /** Make sure the card's link property points at the PDF, so a later
-     *  cache-based lookup finds it instead of creating a duplicate. */
+     *  cache-based lookup finds it instead of creating a duplicate.
+     *  Uses processFrontMatter with feature-detection fallback for
+     *  compatibility with Obsidian versions before 1.4. */
     private async ensureLinkProperty(card: TFile, pdf: TFile): Promise<void> {
         const prop = this.getSettings().pdfLinkProperty || 'pdf';
         const linkText = this.linkText(pdf, card.path);
-        await this.app.fileManager.processFrontMatter(card, (fm) => {
-            const cur = fm[prop];
-            if (cur == null || cur === '') fm[prop] = `[[${linkText}]]`;
-        });
+        if (typeof this.app.fileManager.processFrontMatter === 'function') {
+            await this.app.fileManager.processFrontMatter(card, (fm: Record<string, unknown>) => {
+                const cur = fm[prop];
+                if (cur == null || cur === '') fm[prop] = `[[${linkText}]]`;
+            });
+        }
     }
 
     private async createCardForPdf(pdf: TFile, pageCount = 0): Promise<TFile> {
@@ -916,7 +924,7 @@ export class PdfOutlineFeature {
                 }
                 // Yield to the UI thread every 4 PDFs so Obsidian doesn't freeze.
                 // (Was 8, reduced for better responsiveness with large vaults.)
-                if (i % 4 === 3) await new Promise<void>(r => setTimeout(r, 0));
+                if (i % 4 === 3) await new Promise<void>(r => window.setTimeout(r, 0));
             }
         } finally {
             this.clearPdfIndexCache();
@@ -947,7 +955,7 @@ export class PdfOutlineFeature {
                 }
                 else errorCount++;
                 // Yield every 4 PDFs.
-                if (i % 4 === 3) await new Promise<void>(r => setTimeout(r, 0));
+                if (i % 4 === 3) await new Promise<void>(r => window.setTimeout(r, 0));
             }
         } finally {
             this.clearPdfIndexCache();
@@ -1172,8 +1180,6 @@ class UnprocessedPdfsModal extends Modal {
              this.close();
             void this.feature.processBatch(selectedInfos.map(info => info.pdf));
         });
-
-        this.addStyles(contentEl);
     }
 
     /* ── List rendering ───────────────────────────────────────────────────*/
@@ -1279,7 +1285,7 @@ class UnprocessedPdfsModal extends Modal {
         this.updateCount();
         
         // Восстанавливаем скролл через requestAnimationFrame на случай длинного рендера
-        requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
             if (this.listEl) this.listEl.scrollTop = scrollPos;
         });
     }
@@ -1289,49 +1295,6 @@ class UnprocessedPdfsModal extends Modal {
             `${this.selected.size} / ${this.pdfInfos.length} ${t('pdf.unprocessed.selected')}`;
     }
 
-    /* ── Styles ───────────────────────────────────────────────────────────*/
-
-    private addStyles(el: HTMLElement) {
-        el.createEl('style').textContent = `
-.pdf-outline-unprocessed-modal{padding:16px}
-.pdfo-filter-bar{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
-.pdfo-filter-bar button{padding:4px 10px;border-radius:4px;font-size:.85em;cursor:pointer;
-border:1px solid var(--background-modifier-border);
-background:var(--background-secondary);color:var(--text-normal)}
-.pdfo-filter-bar button.pdfo-filter-active{background:var(--interactive-accent);
-color:var(--text-on-accent);border-color:var(--interactive-accent)}
-.pdfo-header{display:flex;align-items:center;gap:8px;margin:10px 0;padding-bottom:8px;
-border-bottom:1px solid var(--background-modifier-border)}
-.pdfo-count{margin-left:auto;color:var(--text-muted);font-size:.9em}
-.pdfo-group-actions{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
-.pdfo-group-btn{padding:3px 8px;font-size:.82em;border-radius:4px;cursor:pointer;
-border:1px solid var(--background-modifier-border);
-background:var(--background-secondary);color:var(--text-muted)}
-.pdfo-group-btn:hover{background:var(--background-modifier-hover);color:var(--text-normal)}
-.pdfo-list{max-height:420px;overflow-y:auto;display:flex;flex-direction:column;gap:0;
-border:1px solid var(--background-modifier-border);border-radius:6px;padding:0;margin-bottom:14px}
-.pdfo-group-header{display:flex;align-items:center;gap:8px;padding:8px 10px;
-background:var(--modal-background,var(--background-primary));
-border-bottom:1px solid var(--background-modifier-border);
-border-top:1px solid var(--background-modifier-border);
-position:sticky;top:0;z-index:2;
-box-shadow:0 2px 4px rgba(0,0,0,0.05)}
-.pdfo-group-label{font-weight:600;font-size:.9em}
-.pdfo-item{display:flex;align-items:center;gap:10px;padding:6px 10px;
-border-bottom:1px solid var(--background-modifier-border)}
-.pdfo-item:last-child{border-bottom:none}
-.pdfo-item:hover{background:var(--background-modifier-hover)}
-.pdfo-cb{cursor:pointer;flex-shrink:0}
-.pdfo-info{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
-.pdfo-name{font-weight:500}
-.pdfo-path{font-size:.82em;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pdfo-status-badge{font-size:.75em;padding:2px 6px;border-radius:3px;white-space:nowrap;flex-shrink:0}
-.pdfo-status-no_card{background:var(--background-modifier-error);color:var(--text-error)}
-.pdfo-status-empty_section{background:var(--background-modifier-hover);color:var(--text-muted)}
-.pdfo-empty{padding:20px;text-align:center;color:var(--text-muted)}
-.pdfo-actions{display:flex;justify-content:flex-end;gap:10px}
-`;
-    }
     onClose() { this.contentEl.empty(); }
 }
 /* ════════════════════════════════════════════════════════════════════════════
@@ -1402,7 +1365,7 @@ export function renderPdfOutlineSettings(
     new Setting(el)
         .setName(t('pdf.defaultTargetHeadingLevel'))
         .setDesc(t('pdf.defaultTargetHeadingLevelDesc'))
-        .addSlider(sl => sl.setLimits(1, 6, 1).setValue(s.defaultTargetHeadingLevel).setDynamicTooltip()
+        .addSlider(sl => sl.setLimits(1, 6, 1).setValue(s.defaultTargetHeadingLevel)
             .onChange(async v => { s.defaultTargetHeadingLevel = v; await save(); }));
 
     // ── Step 4 · Automation ──────────────────────────────────────────────────
@@ -1420,7 +1383,7 @@ export function renderPdfOutlineSettings(
     new Setting(el)
         .setName(t('pdf.baseHeadingLevel'))
         .setDesc(t('pdf.baseHeadingLevelDesc'))
-        .addSlider(sl => sl.setLimits(0, 6, 1).setValue(s.baseHeadingLevel).setDynamicTooltip()
+        .addSlider(sl => sl.setLimits(0, 6, 1).setValue(s.baseHeadingLevel)
             .onChange(async v => { s.baseHeadingLevel = v; await save(); }));
 
     let listIndentSetting: Setting;
@@ -1488,8 +1451,6 @@ export function renderPdfOutlineSettings(
             .addOption('clipboard', t('pdf.outputClipboard'))
             .setValue(s.output)
             .onChange(async v => { s.output = v as 'cursor' | 'clipboard'; await save(); }));
-
-    injectPdfOutlineSettingsStyles(el);
 }
 /* Collapsible placeholder reference table (shared by the templates above). */
 function renderPlaceholderReference(el: HTMLElement, t: (key: string) => string) {
@@ -1511,12 +1472,4 @@ function renderPlaceholderReference(el: HTMLElement, t: (key: string) => string)
         tr.createEl('td', { text: token, cls: 'pdfo-ph-token' });
         tr.createEl('td', { text: desc });
     }
-}
-/* One-time stylesheet for the guided settings block. */
-function injectPdfOutlineSettingsStyles(el: HTMLElement) {
-    if (el.ownerDocument.getElementById('pdfo-settings-styles')) return;
-    const style = el.ownerDocument.createElement('style');
-    style.id = 'pdfo-settings-styles';
-    style.textContent = `.pdfo-guide{border:1px solid var(--background-modifier-border);border-radius:8px;padding:10px 14px;margin:6px 0 16px;background:var(--background-secondary)} .pdfo-guide-title{font-weight:600;color:var(--text-normal);margin-bottom:6px} .pdfo-guide-step{margin:3px 0;line-height:1.45} .pdfo-warn{color:var(--text-muted);font-style:italic;margin:-4px 0 10px} .pdfo-ph-ref{margin:4px 0 14px;border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 12px} .pdfo-ph-ref>summary{cursor:pointer;font-weight:500;color:var(--text-accent)} .pdfo-ph-table{border-collapse:collapse;margin-top:8px;width:100%} .pdfo-ph-table td{padding:3px 8px;border-bottom:1px solid var(--background-modifier-border);vertical-align:top;font-size:.9em} .pdfo-ph-token{font-family:var(--font-monospace);color:var(--text-accent);white-space:nowrap}`;
-    el.ownerDocument.head.appendChild(style);
 }

@@ -15,6 +15,8 @@ import {
 } from 'obsidian';
 import { EditorView, showPanel, Panel } from '@codemirror/view';
 import { StateField, StateEffect, EditorState } from '@codemirror/state';
+// NOTE: @codemirror/view and @codemirror/state should be listed as dependencies
+// in package.json: `npm i -S @codemirror/view @codemirror/state`
 import {
     PdfOutlineFeature,
     DEFAULT_PDF_OUTLINE_SETTINGS,
@@ -64,343 +66,6 @@ interface SearchResult {
     tags:     string[];
     groupName: string;
 }
-
-/* ═══════════════════════════════════════════════════════════════════════════
-STYLES
-═══════════════════════════════════════════════════════════════════════════ */
-
-const STYLES = `
-:root { --xp-btn-size: 24px; --xp-btn-icon: 13px; --xp-gap: 6px; --xp-btn-radius: var(--radius-s); }
-.lsv-container {
-    padding: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    height: 100%;
-    overflow-y: auto;
-    box-sizing: border-box;
-}
-.lsv-title {
-    margin: 0;
-    font-size: 1.05em;
-    color: var(--text-accent);
-    font-weight: 600;
-}
-.lsv-file-name { font-size: 0.78em; color: var(--text-muted); }
-.lsv-label { font-size: 0.8em; color: var(--text-muted); white-space: nowrap; }
-.lsv-muted  { color: var(--text-muted); font-size: 0.85em; font-style: italic; }
-.lsv-loading {
-    color: var(--text-muted);
-    font-style: italic;
-    font-size: 0.85em;
-    animation: lsv-pulse 1.2s ease-in-out infinite;
-}
-@keyframes lsv-pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-.lsv-aliases-row, .lsv-extra-row, .lsv-badge-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 5px;
-}
-.lsv-input {
-    flex: 1;
-    min-width: 100px;
-    padding: 3px 8px;
-    border-radius: 5px;
-    border: 1px solid var(--background-modifier-border);
-    background: var(--background-primary);
-    color: var(--text-normal);
-    font-size: 0.85em;
-    outline: none;
-}
-.lsv-input:focus {
-    border-color: var(--interactive-accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
-}
-.lsv-btn {
-    padding: 3px 12px;
-    border-radius: 5px;
-    background: var(--interactive-accent);
-    color: var(--text-on-accent);
-    border: none;
-    cursor: pointer;
-    font-size: 0.85em;
-    white-space: nowrap;
-}
-.lsv-btn:hover { filter: brightness(1.1); }
-/* Collapsible search controls in side panel */
-.lsv-search-ctrl { display: none; flex-direction: column; gap: 6px; padding: 4px 0 2px; border-top: 1px solid var(--background-modifier-border); margin-top: 2px; }
-.lsv-search-ctrl.is-open { display: flex; }
-/* Tags / badges */
-.lsv-tag {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 10px;
-    font-size: 0.75em;
-    font-weight: 500;
-    line-height: 1.6;
-}
-.lsv-tag--alias  { background: var(--tag-background); color: var(--tag-color); border: 1px solid var(--tag-border-color, var(--background-modifier-border)); }
-.lsv-tag--extra  { background: color-mix(in srgb, var(--color-green) 15%, transparent); color: var(--color-green); border: 1px solid color-mix(in srgb, var(--color-green) 40%, transparent); }
-.lsv-tag--meta   { background: var(--background-secondary); color: var(--text-muted); border: 1px solid var(--background-modifier-border); }
-/* Results */
-.lsv-results { display: flex; flex-direction: column; gap: 14px; }
-.lsv-section-title {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 0.78em;
-    font-weight: 600;
-    color: var(--h4-color, var(--text-accent));
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    margin: 0 0 6px 0;
-    padding-bottom: 4px;
-    border-bottom: 1px solid var(--background-modifier-border);
-}
-.lsv-sec-icon .svg-icon { width: 12px; height: 12px; }
-.lsv-item {
-    padding: 7px 10px;
-    border-radius: 6px;
-    border: 1px solid var(--background-modifier-border);
-    background: var(--background-secondary);
-    margin-bottom: 4px;
-    transition: border-color .15s;
-    cursor: pointer;
-}
-.lsv-item:hover { border-color: var(--interactive-accent); }
-.lsv-item-title  { margin-bottom: 4px; }
-.lsv-link {
-    font-weight: 600;
-    color: var(--link-color);
-    cursor: pointer;
-    text-decoration: none;
-    font-size: .9em;
-}
-.lsv-link:hover { text-decoration: underline; }
-.lsv-item-tags  { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
-.lsv-item-path  { font-size: .72em; color: var(--text-faint); font-family: var(--font-monospace); margin-bottom: 4px; }
-/* Match rows */
-.lsv-matches { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
-.lsv-match   { font-size: .82em; display: flex; align-items: flex-start; gap: 5px; }
-.lsv-match-icon  { flex-shrink: 0; color: var(--text-accent); width: 14px; height: 14px; margin-top: 1px; display: inline-flex; align-items: center; justify-content: center; }
-.lsv-match-icon .svg-icon { width: 12px; height: 12px; }
-.lsv-match-body  { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
-.lsv-match-label { color: var(--text-normal); font-weight: 500; word-break: break-word; }
-.lsv-match-field { color: var(--text-muted); font-style: italic; font-size: .9em; }
-.lsv-snippet {
-    font-size: .85em;
-    color: var(--text-muted);
-    font-style: italic;
-    white-space: pre-wrap;
-    word-break: break-word;
-    padding: 2px 0 0 2px;
-    border-left: 2px solid var(--background-modifier-border);
-}
-/* Section content (heading modes: with-excerpt / with-section) */
-.lsv-section-wrap { display: flex; flex-direction: column; gap: 2px; }
-.lsv-section-content {
-    font-size: .82em;
-    color: var(--text-muted);
-    white-space: pre-wrap;
-    word-break: break-word;
-    padding: 4px 8px;
-    border-left: 2px solid var(--background-modifier-border);
-    max-height: 5.5em;
-    overflow: hidden;
-    transition: max-height .2s ease;
-}
-.lsv-section-content.lsv-expanded { max-height: 600px; }
-.lsv-section-toggle {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    font-size: .72em;
-    color: var(--text-accent);
-    cursor: pointer;
-    user-select: none;
-    align-self: flex-start;
-}
-.lsv-section-toggle .svg-icon { width: 10px; height: 10px; }
-.lsv-section-toggle:hover { text-decoration: underline; }
-/* Inline block */
-.lsv-block {
-    border: 1px solid var(--background-modifier-border);
-    border-radius: 7px;
-    padding: 10px 12px;
-    background: var(--background-secondary);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-.lsv-divider { border: none; border-top: 1px solid var(--background-modifier-border); margin: 0; }
-/* Settings */
-.lsv-settings-section {
-    margin: 18px 0 4px 0;
-    font-size: .78em;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--text-muted);
-    border-bottom: 1px solid var(--background-modifier-border);
-    padding-bottom: 4px;
-}
-/* ── Inline note panel (CM6 panel + reading-mode banner) ───────────────── */
-.lsv-cm-panel,
-.lsv-reading-banner {
-    box-sizing: border-box;
-    background: var(--background-secondary);
-    border: 1px solid var(--background-modifier-border);
-    font-size: var(--font-ui-small, .85em);
-}
-.lsv-cm-panel {
-    border-left: none;
-    border-right: none;
-    max-height: 40vh;
-    overflow-y: auto;
-}
-.lsv-reading-banner {
-    border-radius: 8px;
-    margin: 0 auto 14px auto;
-    max-width: var(--file-line-width, 100%);
-    max-height: 45vh;
-    overflow-y: auto;
-}
-.lsv-panel-header {
-    display: flex;
-    align-items: center;
-    gap: var(--xp-gap);
-    padding: 6px 12px;
-    position: sticky;
-    top: 0;
-    background: var(--background-secondary);
-    border-bottom: 1px solid var(--background-modifier-border);
-    cursor: pointer;
-    user-select: none;
-}
-.lsv-panel-title-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
-.lsv-panel-title-icon .svg-icon { width: 13px; height: 13px; }
-.lsv-panel-title { font-weight: 600; color: var(--text-accent); flex: 1; }
-.lsv-panel-count { color: var(--text-muted); font-size: .8em; }
-.lsv-panel-collapse { color: var(--text-muted); width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; }
-.lsv-panel-collapse .svg-icon { width: 13px; height: 13px; }
-.lsv-panel-body {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px 12px 12px 12px;
-}
-.lsv-panel-aliases { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-/* Expandable search controls inside the panel */
-.lsv-search-details { border: 1px solid var(--background-modifier-border); border-radius: 6px; }
-.lsv-search-summary {
-    cursor: pointer;
-    user-select: none;
-    padding: 5px 8px;
-    font-size: .82em;
-    color: var(--text-muted);
-    display: flex;
-    gap: 6px;
-    align-items: center;
-}
-.lsv-search-summary::-webkit-details-marker { color: var(--text-faint); }
-.lsv-search-details[open] .lsv-search-summary { border-bottom: 1px solid var(--background-modifier-border); }
-.lsv-search-details > .lsv-panel-aliases,
-.lsv-search-details > .lsv-extra-row { padding: 6px 8px; }
-/* Markdown-rendered match content: flatten block spacing so it reads inline */
-.lsv-md p { margin: 0; }
-.lsv-md ul, .lsv-md ol { margin: 2px 0; padding-left: 1.2em; }
-.lsv-md > :first-child { margin-top: 0; }
-.lsv-md > :last-child  { margin-bottom: 0; }
-.lsv-match-label .lsv-md p, .lsv-match-label p { display: inline; }
-.lsv-match-label-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
-.lsv-head-row { display: flex; align-items: center; gap: var(--xp-gap); }
-.lsv-head-row .lsv-title { flex: 1; margin: 0; }
-.lsv-icon-btn { width: var(--xp-btn-size); height: var(--xp-btn-size); padding: 3px; min-width: unset; flex-shrink: 0; background: transparent; border: none; cursor: pointer; color: var(--text-muted); border-radius: var(--xp-btn-radius); display: inline-flex; align-items: center; justify-content: center; }
-.lsv-icon-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
-.lsv-icon-btn.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
-.lsv-icon-btn .svg-icon { width: var(--xp-btn-icon); height: var(--xp-btn-icon); }
-/* Inline-panel header buttons (smaller than side-panel icon buttons) */
-.lsv-panel-btn { width: 20px; height: 20px; padding: 2px; flex-shrink: 0; color: var(--text-muted); border-radius: var(--xp-btn-radius); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
-.lsv-panel-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
-.lsv-panel-btn.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
-.lsv-panel-btn .svg-icon { width: 12px; height: 12px; }
-/* Groups editor in settings */
-.lsv-group-row .setting-item-info { display: none; }
-.lsv-group-row .setting-item-control { flex-wrap: wrap; gap: 4px; justify-content: flex-start; }
-.lsv-groups-editor .setting-item { border-top: none; padding: 4px 0; }
-.lsv-group-targets { margin: 2px 0 14px 16px; padding-left: 10px; border-left: 2px solid var(--background-modifier-border); }
-.lsv-group-targets .setting-item-description { margin-bottom: 4px; }
-/* ── Icon picker button in group row ─────────────────────── */
-.lsv-icon-picker-btn { display: inline-flex; align-items: center; gap: 4px; font-size: .85em; }
-.lsv-icon-picker-btn-icon { display: inline-flex; align-items: center; }
-.lsv-icon-picker-btn-icon .svg-icon { width: 16px; height: 16px; }
-/* ── Icon Picker Modal ──────────────────────────────────────────── */
-.lsv-icon-picker { padding: 16px; }
-.lsv-icon-picker-search {
-    width: 100%;
-    padding: 6px 10px;
-    border-radius: 6px;
-    border: 1px solid var(--background-modifier-border);
-    background: var(--background-primary);
-    color: var(--text-normal);
-    font-size: .9em;
-    margin-bottom: 12px;
-    outline: none;
-}
-.lsv-icon-picker-search:focus {
-    border-color: var(--interactive-accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
-}
-.lsv-icon-picker-category {
-    font-size: .82em;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    margin: 10px 0 6px 0;
-    padding-bottom: 3px;
-    border-bottom: 1px solid var(--background-modifier-border);
-}
-.lsv-icon-picker-grid {
-    display: grid;
-    grid-template-columns: repeat(8, 1fr);
-    gap: 4px;
-}
-.lsv-icon-picker-cell {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 3px;
-    padding: 6px 2px;
-    border-radius: 6px;
-    cursor: pointer;
-    border: 1px solid transparent;
-    transition: border-color .15s, background .15s;
-}
-.lsv-icon-picker-cell:hover {
-    border-color: var(--interactive-accent);
-    background: var(--background-modifier-hover);
-}
-.lsv-icon-picker-cell .svg-icon { width: 20px; height: 20px; }
-.lsv-icon-picker-cell-name {
-    font-size: .6em;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100%;
-    text-align: center;
-}
-.lsv-icon-picker-empty {
-    color: var(--text-muted);
-    font-style: italic;
-    font-size: .85em;
-    padding: 16px 0;
-    text-align: center;
-}
-`;
 
 /* ═══════════════════════════════════════════════════════════════════════════
 PURE HELPERS
@@ -464,7 +129,7 @@ function extractSnippet(text: string, matchIndex: number, contextChars: number):
 /** Navigate to a vault file in the current non-pinned leaf. */
 function openFile(app: App, filePath: string) {
     const f = app.vault.getAbstractFileByPath(filePath);
-    if (f instanceof TFile) app.workspace.getLeaf(false).openFile(f);
+    if (f instanceof TFile) void app.workspace.getLeaf(false).openFile(f);
 }
 
 /** Safely access the CM6 EditorView from a MarkdownView. */
@@ -517,7 +182,7 @@ function unloadPanelComponent(container: HTMLElement) {
 }
 
 function createDockedPanel(view: EditorView, plugin: LibrarySearchPlugin, atTop: boolean): Panel {
-    const dom = document.createElement('div');
+    const dom = activeDocument.createElement('div');
     dom.className = 'lsv-cm-panel';
     let lastSig = '';
 
@@ -604,14 +269,14 @@ async function renderPanelContents(
     const collapseBtn = header.createSpan({ cls: 'lsv-panel-collapse' });
     setIcon(collapseBtn, collapsed ? 'chevron-right' : 'chevron-down');
 
-    // ── Body — always built; collapse just hides it (no re-search on expand) ─────
+    // ── Body — always built; collapse just hides it via CSS class ────────────
     const body = container.createDiv('lsv-panel-body');
-    if (collapsed) body.style.display = 'none';
+    if (collapsed) body.addClass('lsv-collapsed');
     header.onclick = () => {
         const nowCollapsed = container.dataset.collapsed !== '1';
         container.dataset.collapsed = nowCollapsed ? '1' : '0';
         setIcon(collapseBtn, nowCollapsed ? 'chevron-right' : 'chevron-down');
-        body.style.display = nowCollapsed ? 'none' : '';
+        body.toggleClass('lsv-collapsed', nowCollapsed);
     };
     const aliases = plugin.getSearchTerms(file);
 
@@ -668,7 +333,6 @@ PLUGIN
 export default class LibrarySearchPlugin extends Plugin {
     settings: LibrarySearchSettings;
     panelField: StateField<PanelPayload>;
-    private styleEl: HTMLStyleElement | null = null;
     private readingBanners = new Map<MarkdownView, HTMLElement>();
     private viewSig = new Map<MarkdownView, string>();
     private refreshTimer: number | null = null;
@@ -680,7 +344,6 @@ export default class LibrarySearchPlugin extends Plugin {
     async onload() {
         await this.loadSettings();
         setLanguage(this.settings.language);
-        this.injectStyles();
 
         this.registerView(VIEW_TYPE, leaf => new LibrarySearchView(leaf, this));
 
@@ -697,8 +360,8 @@ export default class LibrarySearchPlugin extends Plugin {
         this.registerEvent(this.app.metadataCache.on('changed',        (file) => { if (this.isPanelScope(file.path)) this.scheduleRefresh(); }));
 
         this.addCommand({
-            id: 'open-library-search',
-            name: 'Open Library Search panel',
+            id: 'open-panel',
+            name: 'Open search panel',
             callback: () => this.activateView(),
         });
 
@@ -731,13 +394,11 @@ export default class LibrarySearchPlugin extends Plugin {
     }
 
     onunload() {
-        this.app.workspace.detachLeavesOfType(VIEW_TYPE);
         for (const v of [...this.readingBanners.keys()]) this.removeReadingBanner(v);
         this.viewSig.clear();
         this.retryViews.clear();
         if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
         if (this.retryTimer !== null) window.clearTimeout(this.retryTimer);
-        this.styleEl?.remove();
     }
 
     private scheduleRefresh() {
@@ -824,7 +485,7 @@ export default class LibrarySearchPlugin extends Plugin {
             ?? view.contentEl;
         let el = this.readingBanners.get(view);
         if (!el) {
-            el = document.createElement('div');
+            el = activeDocument.createElement('div');
             el.className = 'lsv-reading-banner';
             this.readingBanners.set(view, el);
         }
@@ -832,7 +493,7 @@ export default class LibrarySearchPlugin extends Plugin {
         const placed = atTop ? host.firstChild === el : host.lastChild === el;
         if (el.parentElement !== host || !placed) {
             el.remove();
-            atTop ? host.prepend(el) : host.append(el);
+            if (atTop) { host.prepend(el); } else { host.append(el); }
         }
         void renderPanelContents(el, this, filePath);
     }
@@ -856,10 +517,10 @@ export default class LibrarySearchPlugin extends Plugin {
     async activateView() {
         const { workspace } = this.app;
         const leaves = workspace.getLeavesOfType(VIEW_TYPE);
-        if (leaves.length > 0) { workspace.revealLeaf(leaves[0]); return; }
+        if (leaves.length > 0) { workspace.setActiveLeaf(leaves[0], { focus: true }); return; }
         const leaf = workspace.getLeaf('tab');
         await leaf.setViewState({ type: VIEW_TYPE, active: true });
-        workspace.revealLeaf(leaf);
+        workspace.setActiveLeaf(leaf, { focus: true });
     }
 
     getSearchTerms(file: TFile): string[] {
@@ -988,7 +649,7 @@ export default class LibrarySearchPlugin extends Plugin {
 
                             const firstNl = calloutText.indexOf('\n');
                             const firstLine = firstNl === -1 ? calloutText : calloutText.slice(0, firstNl);
-                            const titleMatch = firstLine.match(/^\s*>\s*\[!([^\]]+)\][+\-]?\s*(.*)$/);
+                            const titleMatch = firstLine.match(/^\s*>\s*\[!([^\]]+)\][+-]?\s*(.*)$/);
 
                             if (!titleMatch) continue;
                             const title = titleMatch[2].trim();
@@ -1055,8 +716,8 @@ export default class LibrarySearchPlugin extends Plugin {
                 });
             }
 
-            // Yield to the UI thread every 50 files to prevent freezing on large vaults
-            if (++fileIndex % 20 === 0) await new Promise(r => setTimeout(r, 0));
+            // Yield to the UI thread every 20 files to prevent freezing on large vaults
+            if (++fileIndex % 20 === 0) await new Promise(r => window.setTimeout(r, 0));
         }
 
         return results.sort((a, b) =>
@@ -1075,16 +736,8 @@ export default class LibrarySearchPlugin extends Plugin {
         return path.startsWith(folder + '/') || path === folder;
     }
 
-    private injectStyles() {
-        if (document.getElementById('library-search-styles')) return;
-        this.styleEl = document.createElement('style');
-        this.styleEl.id = 'library-search-styles';
-        this.styleEl.textContent = STYLES;
-        document.head.appendChild(this.styleEl);
-    }
-
     async loadSettings() {
-        const loaded = (await this.loadData()) as any;
+        const loaded = await this.loadData() as Partial<LibrarySearchSettings> | null;
         this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
 
         const DEFAULT_TARGETS: SearchTargets = { headings: true, calloutTitles: true, calloutBodies: false, frontmatterFields: [], noteBody: false, filename: false };
@@ -1097,24 +750,24 @@ export default class LibrarySearchPlugin extends Plugin {
 
         if (!this.settings.language) this.settings.language = 'en';
 
-        if (loaded && !loaded.groups && (loaded.bookTypes || loaded.articleTypes)) {
+        if (loaded && !loaded.groups && ((loaded as Record<string, unknown>).bookTypes || (loaded as Record<string, unknown>).articleTypes)) {
             this.settings.groups = [
-                { name: 'Books',    property: 'type', values: loaded.bookTypes ?? [],    icon: 'book-open', targets: { ...seedTargets } },
-                { name: 'Articles', property: 'type', values: loaded.articleTypes ?? [], icon: 'file-text', targets: { ...seedTargets } },
+                { name: 'Books',    property: 'type', values: ((loaded as Record<string, unknown>).bookTypes as string[]) ?? [],    icon: 'book-open', targets: { ...seedTargets } },
+                { name: 'Articles', property: 'type', values: ((loaded as Record<string, unknown>).articleTypes as string[]) ?? [], icon: 'file-text', targets: { ...seedTargets } },
             ];
         }
         if (!Array.isArray(this.settings.groups) || this.settings.groups.length === 0) {
             this.settings.groups = DEFAULT_SETTINGS.groups.map(g => ({ ...g, values: [...g.values], targets: { ...g.targets } }));
         }
 
-        for (const g of this.settings.groups as any[]) {
+        for (const g of this.settings.groups) {
             if (typeof g.property !== 'string' || g.property === '') {
                 g.property = 'type';
             }
             if (!Array.isArray(g.values)) {
-                g.values = Array.isArray(g.types) ? g.types : [];
+                g.values = Array.isArray((g as Record<string, unknown>).types) ? (g as Record<string, unknown>).types as string[] : [];
             }
-            delete g.types;
+            delete (g as Record<string, unknown>).types;
             g.targets = Object.assign({}, DEFAULT_TARGETS, g.targets ?? seedTargets);
         }
     }
@@ -1231,7 +884,7 @@ function renderResults(
                     // Internal link inside matches: resolve relative to the note
                     evt.preventDefault();
                     const href = a.getAttribute('data-href') ?? a.getAttribute('href') ?? a.textContent ?? '';
-                    if (href) app.workspace.openLinkText(href, filePath, false);
+                    if (href) void app.workspace.openLinkText(href, filePath, false);
                 }
                 return;
             }
@@ -1322,7 +975,7 @@ class LibrarySearchView extends ItemView {
                     const file = leaf.view.file;
                     if (file && file !== this.trackedFile) {
                         this.trackedFile = file;
-                        this.rebuild();
+                        void this.rebuild();
                     }
                 }
             }),
@@ -1332,7 +985,7 @@ class LibrarySearchView extends ItemView {
                 if (file !== this.trackedFile) return;
                 const sig = this.plugin.getSearchTerms(file).join('\u0001');
                 if (sig === this.lastAliasSig) return;
-                this.rebuild();
+                void this.rebuild();
             }),
         );
         this.trackedFile = this.app.workspace.getActiveFile();
@@ -1402,7 +1055,7 @@ class LibrarySearchView extends ItemView {
             await this.doSearch(root, [...aliases, ...this.extraTerms]);
         };
         btn.onclick = run;
-        input.onkeydown = e => { if (e.key === 'Enter') run(); };
+        input.onkeydown = e => { if (e.key === 'Enter') void run(); };
 
         await this.doSearch(root, [...aliases, ...this.extraTerms]);
     }
@@ -1443,7 +1096,11 @@ class LibrarySearchBlock extends MarkdownRenderChild {
         private plugin: LibrarySearchPlugin,
     ) { super(containerEl); }
 
-    async onload() {
+    onload() {
+        void this._loadContent();
+    }
+
+    private async _loadContent() {
         const el = this.containerEl;
         el.addClass('lsv-block');
 

@@ -169,7 +169,7 @@ class IconPickerModal extends Modal {
             for (const ic of icons) {
                 const cell = grid.createDiv({ cls: 'lsv-icon-picker-cell' });
                 if (ic.value === this.current) {
-                    cell.style.borderColor = 'var(--interactive-accent)';
+                    cell.addClass('lsv-icon-picker-cell--selected');
                 }
                 const iconSpan = cell.createSpan();
                 setIcon(iconSpan, ic.value);
@@ -199,7 +199,7 @@ export class LibrarySearchSettingTab extends PluginSettingTab {
      *  firing before a text-input debounce and writing a stale value. */
     private async saveFlushed(): Promise<void> {
         this.saveDebounced.cancel();
-        await this.saveFlushed();
+        await this.plugin.saveSettings();
     }
 
     hide() {
@@ -296,10 +296,12 @@ export class LibrarySearchSettingTab extends PluginSettingTab {
                     b.buttonEl.createSpan({ text: ' ' + g.icon });
                     b.setTooltip(t('settings.pickIcon'));
                     b.onClick(() => {
-                        new IconPickerModal(this.app, g.icon, async (iconId) => {
-                            g.icon = iconId;
-                            await this.saveFlushed();
-                            renderGroups();
+                        new IconPickerModal(this.app, g.icon, (iconId) => {
+                            void (async () => {
+                                g.icon = iconId;
+                                await this.saveFlushed();
+                                renderGroups();
+                            })();
                         }).open();
                     });
                 });
