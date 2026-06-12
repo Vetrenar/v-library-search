@@ -2,7 +2,7 @@
 {
 	"id": "library-search",
 	"name": "Library Search",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"minAppVersion": "1.4.0",
 	"description": "Context-aware library search based on note aliases and automated PDF outline extraction for Zettelkasten card/atomic note index workflows.",
 	"author": "Vetrenar",
