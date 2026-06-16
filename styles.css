@@ -3,7 +3,7 @@ STYLES — extracted from main.ts (was STYLES constant) and pdf-outline.ts
 Obsidian loads styles.css automatically; no runtime injection needed.
 ═══════════════════════════════════════════════════════════════════════════ */
 
-:root { --xp-btn-size: 24px; --xp-btn-icon: 13px; --xp-gap: 6px; --xp-btn-radius: var(--radius-s); }
+:root { --xp-btn-size: 24px; --xp-btn-icon: 13px; --xp-gap: 6px; --xp-btn-radius: var(--radius-s); --lsv-panel-header-h: 32px; }
 .lsv-container {
     padding: 14px;
     display: flex;
@@ -64,6 +64,17 @@ Obsidian loads styles.css automatically; no runtime injection needed.
 /* Collapsible search controls in side panel */
 .lsv-search-ctrl { display: none; flex-direction: column; gap: 6px; padding: 4px 0 2px; border-top: 1px solid var(--background-modifier-border); margin-top: 2px; }
 .lsv-search-ctrl.is-open { display: flex; }
+/* Inside the docked CM6 panel and the reading-mode banner (both scroll
+   internally via overflow-y:auto), the search row follows the header as you
+   scroll the result list, instead of disappearing under it. The side-panel
+   (.lsv-container) search-ctrl is unaffected — it isn't a sticky context. */
+.lsv-cm-panel .lsv-search-ctrl.is-open,
+.lsv-reading-banner .lsv-search-ctrl.is-open {
+    position: sticky;
+    top: var(--lsv-panel-header-h);
+    z-index: 1;
+    background: var(--background-secondary);
+}
 /* Tags / badges */
 .lsv-tag {
     display: inline-block;
@@ -204,8 +215,11 @@ Obsidian loads styles.css automatically; no runtime injection needed.
     align-items: center;
     gap: var(--xp-gap);
     padding: 6px 12px;
+    box-sizing: border-box;
+    height: var(--lsv-panel-header-h);
     position: sticky;
     top: 0;
+    z-index: 2;
     background: var(--background-secondary);
     border-bottom: 1px solid var(--background-modifier-border);
     cursor: pointer;

@@ -96,6 +96,21 @@ interface ExtractedOutline {
     pageLabels: string[] | null;
     pageCount: number;        // total pages in the PDF (0 if unknown)
 }
+/* ── Minimal PDF.js surface ──────────────────────────────────────────────────
+ * Obsidian's `loadPdfJs()` is typed as `Promise<any>`. We narrow it to the
+ * tiny slice of the pdf.js API we actually touch, so the rest of the reader is
+ * fully type-checked instead of leaking `any` everywhere. */
+interface PdfDocumentProxy {
+    numPages: number;
+    getOutline(): Promise<unknown[] | null>;
+    getPageLabels(): Promise<string[] | null>;
+    getDestination(id: string): Promise<unknown[] | null>;
+    getPageIndex(ref: unknown): Promise<number>;
+    destroy(): Promise<void>;
+}
+interface PdfJsModule {
+    getDocument(src: { data: ArrayBuffer }): { promise: Promise<PdfDocumentProxy> };
+}
 /* ── Template placeholders ───────────────────────────────────────────────────
 Templates (card filename, card body, link display) use {{token}} syntax.
 {{page}}          Physical page number, counted from 1          e.g. 32
@@ -150,6 +165,8 @@ interface PdfIndex {
 'empty_section'  — the card exists but the target heading section is empty
                 (heading missing or has no content under it). */
 type UnprocessedStatus = 'no_card' | 'empty_section';
+/** The three filter buttons in the "unprocessed PDFs" modal. */
+type FilterMode = 'all' | UnprocessedStatus;
 /** A PDF that needs attention, with the reason why. */
 interface UnprocessedPdfInfo {
     pdf: TFile;
@@ -421,7 +438,7 @@ export class PdfOutlineFeature {
     /* ── PDF reading ────────────────────────────────────────────────────────*/
 
     private async readPdfOutline(pdf: TFile): Promise<ExtractedOutline> {
-        const pdfjsLib = await loadPdfJs();
+        const pdfjsLib = await loadPdfJs() as PdfJsModule;
 
         // 🛡 OOM Protection: Skip huge files to prevent Electron crash.
         // 250 MB is a safe upper bound for Uint8Array allocation in V8.
@@ -432,21 +449,21 @@ export class PdfOutlineFeature {
             return { entries: [], pageLabels: null, pageCount: 0 };
         }
 
-        let doc: Record<string, unknown> | null = null;
+        let doc: PdfDocumentProxy | null = null;
         try {
             // Pass ArrayBuffer directly to PDF.js — avoids a 2× peak-memory spike.
             const data = await this.app.vault.readBinary(pdf);
-            doc = await (pdfjsLib as Record<string, unknown>).getDocument({ data }).promise as Record<string, unknown>;
+            doc = await pdfjsLib.getDocument({ data }).promise;
 
             const entries: OutlineEntry[] = [];
-            const tree = await (doc.getOutline as () => Promise<unknown[]>)();
+            const tree = await doc.getOutline();
             if (tree && tree.length) await this.flatten(doc, tree, 1, entries);
 
             let pageLabels: string[] | null = null;
             if (this.getSettings().usePageLabels) {
-                try { pageLabels = await (doc.getPageLabels as () => Promise<string[] | null>)(); } catch { pageLabels = null; }
+                try { pageLabels = await doc.getPageLabels(); } catch { pageLabels = null; }
             }
-            const pageCount: number = (typeof doc.numPages === 'number') ? doc.numPages as number : 0;
+            const pageCount = doc.numPages;
             return {  entries, pageLabels, pageCount };
         } catch (e) {
             console.error(`[PDF Outline] Failed to parse ${pdf.path}:`, e);
@@ -457,13 +474,13 @@ export class PdfOutlineFeature {
             // Without this, batch processing hundreds of PDFs will leak memory
             // until Obsidian's V8 heap is exhausted.
             if (doc) {
-                try { if (typeof doc.destroy === 'function') await (doc.destroy as () => Promise<void>)(); } catch { /* no-op */ }
+                try { await doc.destroy(); } catch { /* no-op */ }
             }
         }
     }
 
     /** Iterative stack-based flattening — avoids call-stack overflow on deep outlines. */
-    private async flatten(doc: Record<string, unknown>, rootItems: unknown[], startDepth: number, acc: OutlineEntry[]) {
+    private async flatten(doc: PdfDocumentProxy, rootItems: unknown[], startDepth: number, acc: OutlineEntry[]) {
         interface StackItem { item: Record<string, unknown>; depth: number }
         const stack: StackItem[] = rootItems
             .slice().reverse().map(item => ({ item: item as Record<string, unknown>, depth: startDepth }));
@@ -484,15 +501,15 @@ export class PdfOutlineFeature {
         }
     }
 
-    private async resolveDest(doc: Record<string, unknown>, dest: string | unknown[] | null): Promise<number | null> {
+    private async resolveDest(doc: PdfDocumentProxy, dest: string | unknown[] | null): Promise<number | null> {
         try {
             if (dest == null) return null;
-            const explicit: unknown[] | null = Array.isArray(dest) ? dest : await (doc.getDestination as (d: string) => Promise<unknown[] | null>)(dest as string);
+            const explicit: unknown[] | null = Array.isArray(dest) ? dest : await doc.getDestination(dest);
             if (!explicit || !explicit.length) return null;
             const ref = explicit[0];
             if (ref == null) return null;
             if (typeof ref === 'number') return ref;          // rare: direct 0-based page
-            const pageIndex = await (doc.getPageIndex as (r: unknown) => Promise<number>)(ref);
+            const pageIndex = await doc.getPageIndex(ref);
             // Guard against undefined/null returns from getPageIndex
             return (typeof pageIndex === 'number') ? pageIndex : null;
         } catch { return null; }
@@ -582,7 +599,7 @@ export class PdfOutlineFeature {
             if (dest) return dest;
         }
         // 2) Raw frontmatter value.
-        const raw = cache?.frontmatter?.[prop];
+        const raw: unknown = cache?.frontmatter?.[prop];
         for (const v of Array.isArray(raw) ? raw : [raw]) {
             if (typeof v !== 'string') continue;
             const dest = resolve(v);
@@ -1067,7 +1084,7 @@ class UnprocessedPdfsModal extends Modal {
     private selected: Set<number> = new Set();
     private listEl!: HTMLElement;
     private countEl!: HTMLElement;
-    private filterMode: 'all' | 'no_card' | 'empty_section' = 'all';
+    private filterMode: FilterMode = 'all';
     constructor(
         app: App,
         private feature: PdfOutlineFeature,
@@ -1097,7 +1114,7 @@ class UnprocessedPdfsModal extends Modal {
 
         // ── Filter tabs ────────────────────────────────────────────────────
         const filterBar = contentEl.createDiv({ cls: 'pdfo-filter-bar' });
-        const filters: { key: typeof this.filterMode; label: string; count: number }[] = [
+        const filters: { key: FilterMode; label: string; count: number }[] = [
             { key: 'all',            label: t('pdf.unprocessed.filterAll'),    count: this.pdfInfos.length },
             { key: 'no_card',        label: t('pdf.unprocessed.filterNoCard'), count: noCard },
             { key: 'empty_section',  label: t('pdf.unprocessed.filterEmpty'), count: empty },

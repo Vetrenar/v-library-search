@@ -2,6 +2,7 @@ import {
     App,
     CachedMetadata,
     Component,
+    debounce,
     HeadingCache,
     ItemView,
     MarkdownPostProcessorContext,
@@ -65,6 +66,36 @@ interface SearchResult {
     matches:  Match[];
     tags:     string[];
     groupName: string;
+}
+
+/** Split the "extra terms" box into individual filter tokens: comma- or
+ *  whitespace-separated, case-folded per the user's case-sensitivity setting. */
+function filterTokens(raw: string, caseSensitive: boolean): string[] {
+    return raw
+        .split(/[,\s]+/)
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(s => caseSensitive ? s : s.toLowerCase());
+}
+
+/** Flatten everything a result shows on screen into one haystack, so the
+ *  quick filter checks the same text the user is looking at. */
+function resultHaystack(r: SearchResult): string {
+    const parts: string[] = [r.noteName, r.filePath, r.groupName, ...r.tags];
+    for (const m of r.matches) {
+        parts.push(m.label);
+        if (m.fieldName)      parts.push(m.fieldName);
+        if (m.snippet)        parts.push(m.snippet);
+        if (m.sectionContent) parts.push(m.sectionContent);
+    }
+    return parts.join('\n');
+}
+
+/** True if every token is found somewhere in the result (AND, not OR). */
+function resultMatchesTokens(r: SearchResult, tokens: string[], caseSensitive: boolean): boolean {
+    if (tokens.length === 0) return true;
+    const hay = caseSensitive ? resultHaystack(r) : resultHaystack(r).toLowerCase();
+    return tokens.every(tok => hay.includes(tok));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -297,33 +328,48 @@ async function renderPanelContents(
 
     const resultsWrap = body.createDiv('lsv-results');
 
-    const run = async () => {
-        container.dataset.extra = input.value;
-        const extra = input.value.split(',').map(x => x.trim()).filter(Boolean);
-        const terms = [...aliases, ...extra];
+    /** (Re)render `results`, replacing whatever is currently shown. Each call
+     *  needs a fresh Component so renderResults' delegated listeners aren't
+     *  layered on top of stale ones. */
+    const showResults = (results: SearchResult[]) => {
         resultsWrap.empty();
-
         unloadPanelComponent(container);
         const comp = new Component();
         comp.load();
         panelComponents.set(container, comp);
-
-        if (terms.length === 0) {
-            resultsWrap.createDiv({ text: t('ui.noAliases'), cls: 'lsv-muted' });
-            countEl.setText('');
-            return;
-        }
-
-        const load = resultsWrap.createDiv({ text: t('ui.searching'), cls: 'lsv-loading' });
-        const results = await plugin.searchLibrary(terms);
-        load.remove();
         countEl.setText(results.length ? `${results.length}` : '');
         renderResults(resultsWrap, results, plugin.settings.display, plugin.settings.groups, plugin.app, comp);
     };
 
-    btn.onclick = run;
-    input.onkeydown = e => { if (e.key === 'Enter') void run(); };
-    void run();
+    /** Results from the alias-based search — fetched once. The extra-terms
+     *  box below narrows this set client-side; it never re-queries the vault. */
+    let baseResults: SearchResult[] = [];
+
+    /** Apply the extra-terms box as an AND filter over `baseResults`. */
+    const applyFilter = () => {
+        const tokens = filterTokens(input.value, plugin.settings.behavior.caseSensitive);
+        showResults(baseResults.filter(r => resultMatchesTokens(r, tokens, plugin.settings.behavior.caseSensitive)));
+    };
+    const applyFilterDebounced = debounce(applyFilter, 120, true);
+
+    if (aliases.length === 0) {
+        resultsWrap.createDiv({ text: t('ui.noAliases'), cls: 'lsv-muted' });
+        countEl.setText('');
+    } else {
+        const load = resultsWrap.createDiv({ text: t('ui.searching'), cls: 'lsv-loading' });
+        baseResults = await plugin.searchLibrary(aliases);
+        load.remove();
+        applyFilter();
+    }
+
+    // Typing filters the results already on screen — no new vault search.
+    input.addEventListener('input', () => {
+        container.dataset.extra = input.value;
+        applyFilterDebounced();
+    });
+    // Enter / button: flush the debounce and apply immediately.
+    input.onkeydown = e => { if (e.key === 'Enter') { applyFilterDebounced.cancel(); applyFilter(); } };
+    btn.onclick = () => { applyFilterDebounced.cancel(); applyFilter(); };
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -454,7 +500,7 @@ export default class LibrarySearchPlugin extends Plugin {
             if (cm) {
                 cm.dispatch({
                     effects: setPanelPayload.of({
-                        filePath: shouldHaveEditorPanel ? file!.path : null,
+                        filePath: shouldHaveEditorPanel ? file.path : null,
                         sig,
                     }),
                 });
@@ -529,7 +575,7 @@ export default class LibrarySearchPlugin extends Plugin {
         const cfg = this.settings.terms;
 
         if (cfg.source === 'property' && cfg.property) {
-            const raw = fm[cfg.property];
+            const raw: unknown = fm[cfg.property];
             if (raw == null) return [];
             return (Array.isArray(raw) ? raw : [raw]).map(String).map(s => s.trim()).filter(Boolean);
         }
@@ -556,7 +602,7 @@ export default class LibrarySearchPlugin extends Plugin {
             if (!fm) continue;
 
             const group = this.settings.groups.find(g => {
-                const raw = fm[g.property];
+                const raw: unknown = fm[g.property];
                 if (raw == null) return false;
                 const vals = (Array.isArray(raw) ? raw : [raw]).map(x => String(x).trim());
                 if (g.values.length === 0) return vals.some(v => v !== '');
@@ -741,7 +787,14 @@ export default class LibrarySearchPlugin extends Plugin {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
 
         const DEFAULT_TARGETS: SearchTargets = { headings: true, calloutTitles: true, calloutBodies: false, frontmatterFields: [], noteBody: false, filename: false };
-        const seedTargets: SearchTargets = Object.assign({}, DEFAULT_TARGETS, (loaded && loaded.targets) || {});
+        // Legacy migration: very old versions stored a single top-level `targets`
+        // object. It is no longer part of the typed settings, so read it the same
+        // defensive way as the bookTypes/articleTypes legacy reads below.
+        let legacyTargets: Partial<SearchTargets> = {};
+        if (loaded) {
+            legacyTargets = ((loaded as Record<string, unknown>).targets as Partial<SearchTargets> | undefined) ?? {};
+        }
+        const seedTargets: SearchTargets = Object.assign({}, DEFAULT_TARGETS, legacyTargets);
         this.settings.display  = Object.assign({}, DEFAULT_SETTINGS.display,  this.settings.display);
         this.settings.behavior = Object.assign({}, DEFAULT_SETTINGS.behavior, this.settings.behavior);
         this.settings.panel    = Object.assign({}, DEFAULT_SETTINGS.panel,    this.settings.panel);
@@ -869,12 +922,12 @@ function renderResults(
         // One listener per section instead of N*2 listeners per item.
         // `component.registerDomEvent` auto-removes them on component.unload().
         component.registerDomEvent(section, 'click', (evt: MouseEvent) => {
-            const item = (evt.target as HTMLElement).closest('.lsv-item') as HTMLElement | null;
+            const item = (evt.target as HTMLElement).closest<HTMLElement>('.lsv-item');
             if (!item) return;
             const filePath = item.dataset.filePath;
             if (!filePath) return;
 
-            const a = (evt.target as HTMLElement).closest('a.internal-link') as HTMLElement | null;
+            const a = (evt.target as HTMLElement).closest<HTMLElement>('a.internal-link');
             if (a) {
                 if (a.classList.contains('lsv-link')) {
                     // Title link: open the note itself
@@ -893,9 +946,9 @@ function renderResults(
         });
 
         component.registerDomEvent(section, 'mouseover', (evt: MouseEvent) => {
-            const a = (evt.target as HTMLElement).closest('a.internal-link') as HTMLElement | null;
+            const a = (evt.target as HTMLElement).closest<HTMLElement>('a.internal-link');
             if (!a) return;
-            const item = a.closest('.lsv-item') as HTMLElement | null;
+            const item = a.closest<HTMLElement>('.lsv-item');
             const href = a.getAttribute('data-href') ?? a.getAttribute('href') ?? a.textContent ?? '';
             if (!href || !item) return;
             const filePath = item.dataset.filePath;
@@ -950,7 +1003,9 @@ TAB VIEW
 
 class LibrarySearchView extends ItemView {
     private plugin: LibrarySearchPlugin;
-    private extraTerms: string[] = [];
+    private aliases: string[] = [];
+    private baseResults: SearchResult[] = [];
+    private extraFilterRaw = '';
     private trackedFile: TFile | null = null;
     private isPinned = false;
     private searchCtrlOpen = false;
@@ -1030,57 +1085,78 @@ class LibrarySearchView extends ItemView {
             searchCtrl.createDiv({ text: this.trackedFile.basename, cls: 'lsv-file-name' });
         }
 
-        const aliases = this.trackedFile
+        this.aliases = this.trackedFile
             ? this.plugin.getSearchTerms(this.trackedFile)
             : [];
-        this.lastAliasSig = aliases.join('\u0001');
+        this.lastAliasSig = this.aliases.join('\u0001');
 
         const aliasRow = searchCtrl.createDiv('lsv-aliases-row');
         aliasRow.createSpan({ text: t('ui.aliases'), cls: 'lsv-label' });
-        if (aliases.length === 0) {
+        if (this.aliases.length === 0) {
             aliasRow.createSpan({ text: t('ui.none'), cls: 'lsv-muted' });
         } else {
-            aliases.forEach(a => aliasRow.createSpan({ text: a, cls: 'lsv-tag lsv-tag--alias' }));
+            this.aliases.forEach(a => aliasRow.createSpan({ text: a, cls: 'lsv-tag lsv-tag--alias' }));
         }
 
         const extraRow = searchCtrl.createDiv('lsv-extra-row');
         extraRow.createSpan({ text: t('ui.extra'), cls: 'lsv-label' });
         const input = extraRow.createEl('input', { type: 'text', cls: 'lsv-input' });
         input.placeholder = t('ui.extraTerms');
-        input.value = this.extraTerms.join(', ');
+        input.value = this.extraFilterRaw;
         const btn = extraRow.createEl('button', { text: t('ui.search'), cls: 'lsv-btn' });
 
-        const run = async () => {
-            this.extraTerms = input.value.split(',').map(x => x.trim()).filter(Boolean);
-            await this.doSearch(root, [...aliases, ...this.extraTerms]);
+        // The extra-terms box filters the results already on screen (AND, all
+        // tokens must be present) — it never re-queries the vault.
+        const applyNow = () => {
+            if (this.aliases.length === 0) return;
+            const wrap = root.querySelector<HTMLElement>('.lsv-results');
+            if (wrap) this.renderFiltered(wrap);
         };
-        btn.onclick = run;
-        input.onkeydown = e => { if (e.key === 'Enter') void run(); };
+        const applyDebounced = debounce(applyNow, 120, true);
 
-        await this.doSearch(root, [...aliases, ...this.extraTerms]);
+        input.addEventListener('input', () => {
+            this.extraFilterRaw = input.value;
+            applyDebounced();
+        });
+        input.onkeydown = e => { if (e.key === 'Enter') { applyDebounced.cancel(); applyNow(); } };
+        btn.onclick = () => { applyDebounced.cancel(); applyNow(); };
+
+        await this.doSearch(root);
     }
 
-    private async doSearch(root: HTMLElement, terms: string[]) {
+    /** Runs the alias-based vault search and caches the result set. */
+    private async doSearch(root: HTMLElement) {
         root.querySelector('.lsv-results')?.remove();
         if (this.renderComp) { this.removeChild(this.renderComp); this.renderComp = null; }
         const wrap = root.createDiv('lsv-results');
 
-        if (terms.length === 0) {
+        if (this.aliases.length === 0) {
+            this.baseResults = [];
             wrap.createDiv({ text: t('ui.openNote'), cls: 'lsv-muted' });
             return;
         }
 
+        const loadEl = wrap.createDiv({ text: t('ui.searching'), cls: 'lsv-loading' });
+        const gen     = ++this.searchGen;
+        const results = await this.plugin.searchLibrary(this.aliases);
+        if (gen !== this.searchGen) return;   // stale — a newer search superseded this one
+        loadEl.remove();
+
+        this.baseResults = results;
+        this.renderFiltered(wrap);
+    }
+
+    /** Re-renders `wrap` with `baseResults` narrowed by the extra-terms filter. */
+    private renderFiltered(wrap: HTMLElement) {
+        wrap.empty();
+        if (this.renderComp) { this.removeChild(this.renderComp); this.renderComp = null; }
         const comp = new Component();
         this.addChild(comp);
         this.renderComp = comp;
 
-        const loadEl = wrap.createDiv({ text: t('ui.searching'), cls: 'lsv-loading' });
-        const gen     = ++this.searchGen;
-        const results = await this.plugin.searchLibrary(terms);
-        if (gen !== this.searchGen) return;   // stale — a newer search superseded this one
-        loadEl.remove();
-
-        renderResults(wrap, results, this.plugin.settings.display, this.plugin.settings.groups, this.app, comp);
+        const tokens = filterTokens(this.extraFilterRaw, this.plugin.settings.behavior.caseSensitive);
+        const filtered = this.baseResults.filter(r => resultMatchesTokens(r, tokens, this.plugin.settings.behavior.caseSensitive));
+        renderResults(wrap, filtered, this.plugin.settings.display, this.plugin.settings.groups, this.app, comp);
     }
 }
 
