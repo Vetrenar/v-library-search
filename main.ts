@@ -30,6 +30,8 @@ import {
     BehaviorSettings,
     GroupRule,
     SearchTargets,
+    TermSourceSettings,
+    defaultTargets,
     LibrarySearchSettingTab,
 } from './settings';
 
@@ -46,6 +48,7 @@ type MatchKind =
     | 'callout-body'   // ❯  inside callout body
     | 'frontmatter'    // ⊟  frontmatter field value
     | 'body'           // ¶  plain note body
+    | 'list'           // •  list item / task
     | 'filename';      // 📄 file basename
 
 interface Match {
@@ -309,7 +312,7 @@ async function renderPanelContents(
         setIcon(collapseBtn, nowCollapsed ? 'chevron-right' : 'chevron-down');
         body.toggleClass('lsv-collapsed', nowCollapsed);
     };
-    const aliases = plugin.getSearchTerms(file);
+    const aliases = plugin.searchTermsUnion(file);
 
     const searchCtrl = body.createDiv({ cls: 'lsv-search-ctrl' + (searchOpen ? ' is-open' : '') });
     const aliasRow = searchCtrl.createDiv('lsv-panel-aliases');
@@ -357,7 +360,7 @@ async function renderPanelContents(
         countEl.setText('');
     } else {
         const load = resultsWrap.createDiv({ text: t('ui.searching'), cls: 'lsv-loading' });
-        baseResults = await plugin.searchLibrary(aliases);
+        baseResults = await plugin.searchLibrary(file);
         load.remove();
         applyFilter();
     }
@@ -489,7 +492,7 @@ export default class LibrarySearchPlugin extends Plugin {
             const inScope = panel.enabled && !!file && this.isPanelScope(file.path);
             const mode    = view.getMode();
 
-            const aliases = inScope && file ? this.getSearchTerms(file).join('\u0001') : '';
+            const aliases = inScope && file ? this.searchTermsUnion(file).join('\u0001') : '';
             const sig = inScope && file ? `${mode}|${file.path}|${aliases}|${panel.position}` : 'hidden';
 
             if (this.viewSig.get(view) === sig) continue;
@@ -549,15 +552,19 @@ export default class LibrarySearchPlugin extends Plugin {
         if (el) { unloadPanelComponent(el); el.remove(); this.readingBanners.delete(view); }
     }
 
+    /** Panel visibility rule. 'all' (default) shows everywhere; 'only'/'except'
+     *  gate on the listed folders. An empty folder list under 'only'/'except'
+     *  is treated as "no restriction" so a half-configured rule doesn't hide
+     *  the panel everywhere. */
     private isPanelScope(path: string): boolean {
-        const folders = this.settings.panel.triggerFolders.length
-            ? this.settings.panel.triggerFolders
-            : [this.effectiveLibraryFolder()];
-        return folders.some(f => {
+        const { scope, folders } = this.settings.panel;
+        if (scope === 'all' || folders.length === 0) return true;
+        const inFolders = folders.some(f => {
             const folder = f.replace(/\/+$/, '');
-            if (!folder) return true;
+            if (!folder) return false;
             return path === folder || path.startsWith(folder + '/');
         });
+        return scope === 'except' ? !inFolders : inFolders;
     }
 
     async activateView() {
@@ -569,13 +576,15 @@ export default class LibrarySearchPlugin extends Plugin {
         workspace.setActiveLeaf(leaf, { focus: true });
     }
 
-    getSearchTerms(file: TFile): string[] {
+    /** Reads search terms from a file's frontmatter using the given source
+     *  (defaults to the global setting). Per-group overrides pass their own
+     *  TermSourceSettings here. */
+    getSearchTerms(file: TFile, source: TermSourceSettings = this.settings.terms): string[] {
         const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
         if (!fm) return [];
-        const cfg = this.settings.terms;
 
-        if (cfg.source === 'property' && cfg.property) {
-            const raw: unknown = fm[cfg.property];
+        if (source.source === 'property' && source.property) {
+            const raw: unknown = fm[source.property];
             if (raw == null) return [];
             return (Array.isArray(raw) ? raw : [raw]).map(String).map(s => s.trim()).filter(Boolean);
         }
@@ -585,13 +594,57 @@ export default class LibrarySearchPlugin extends Plugin {
         return (Array.isArray(raw) ? raw : [raw]).map(String).map(s => s.trim()).filter(Boolean);
     }
 
-    async searchLibrary(terms: string[]): Promise<SearchResult[]> {
-        if (terms.length === 0) return [];
+    /** Distinct term sources actually in use: the global default (if any group
+     *  falls back to it, or there are no groups at all) plus every per-group
+     *  override. Deduplicated so vaults using one source everywhere stay cheap. */
+    private effectiveSources(): TermSourceSettings[] {
+        const seen = new Set<string>();
+        const out: TermSourceSettings[] = [];
+        const push = (src: TermSourceSettings) => {
+            const key = `${src.source}\u0000${src.property}`;
+            if (!seen.has(key)) { seen.add(key); out.push(src); }
+        };
+        if (this.settings.groups.length === 0 || this.settings.groups.some(g => !g.terms)) push(this.settings.terms);
+        for (const g of this.settings.groups) if (g.terms) push(g.terms);
+        return out;
+    }
 
-        const { display, behavior } = this.settings;
-        const { tester, looper } = buildPatterns(terms, behavior);
+    /** Union (deduped) of the active note's terms across every term source in
+     *  use. Used for the panel/view term badges, the "any terms?" guard, and
+     *  the re-render signature — not for the actual vault scan, which builds
+     *  its own pattern per group/source in searchLibrary(). */
+    searchTermsUnion(file: TFile): string[] {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const src of this.effectiveSources())
+            for (const term of this.getSearchTerms(file, src))
+                if (!seen.has(term)) { seen.add(term); out.push(term); }
+        return out;
+    }
+
+    /** Scans the library for the active note's search terms.
+     *  `extraTerms` (used by the inline code-block) are OR'ed into every
+     *  group's query alongside that group's own term-source terms. The
+     *  panel and side-view instead apply extra terms as a client-side AND
+     *  filter over the returned results — see filterTokens/resultMatchesTokens. */
+    async searchLibrary(activeFile: TFile, extraTerms: string[] = []): Promise<SearchResult[]> {
+        const { behavior } = this.settings;
         const cap = behavior.maxMatchesPerFile;
         const results: SearchResult[] = [];
+
+        // Patterns are built once per distinct term source — most vaults use a
+        // single source everywhere, so this is normally a one-time cost.
+        const patternCache = new Map<string, { tester: RegExp; looper: RegExp } | null>();
+        const patternsFor = (src: TermSourceSettings) => {
+            const key = `${src.source}\u0000${src.property}`;
+            let entry = patternCache.get(key);
+            if (entry === undefined) {
+                const terms = [...this.getSearchTerms(activeFile, src), ...extraTerms];
+                entry = terms.length ? buildPatterns(terms, behavior) : null;
+                patternCache.set(key, entry);
+            }
+            return entry;
+        };
 
         const libFiles = this.app.vault.getMarkdownFiles().filter(f => this.isInLibrary(f.path));
         let fileIndex = 0;
@@ -609,6 +662,10 @@ export default class LibrarySearchPlugin extends Plugin {
                 return vals.some(v => g.values.includes(v));
             });
             if (!group) continue;
+
+            const pat = patternsFor(group.terms ?? this.settings.terms);
+            if (!pat) continue;          // this group's term source yields nothing for this note
+            const { tester, looper } = pat;
             const targets = group.targets;
 
             let _content: string | null = null;
@@ -630,10 +687,8 @@ export default class LibrarySearchPlugin extends Plugin {
             };
 
             // ── Filename ─────────────────────────────────────────────────────
-            if (targets.filename) {
-                if (tester.test(file.basename)) {
-                    add({ kind: 'filename', label: file.basename });
-                }
+            if (targets.filename && tester.test(file.basename)) {
+                add({ kind: 'filename', label: file.basename });
             }
 
             // ── Frontmatter fields ────────────────────────────────────────────
@@ -641,22 +696,17 @@ export default class LibrarySearchPlugin extends Plugin {
                 for (const field of targets.frontmatterFields) {
                     if (cap > 0 && matches.length >= cap) break;
                     const value = String(fm[field] ?? '');
-                    if (!value) continue;
-                    if (tester.test(value)) {
-                        looper.lastIndex = 0;
-                        const m = looper.exec(value);
-                        const snippet = display.showBodySnippet && m
-                            ? extractSnippet(value, m.index, display.snippetContextChars)
-                            : undefined;
-                        add({ kind: 'frontmatter', label: value, fieldName: field, snippet });
+                    if (value && tester.test(value)) {
+                        add({ kind: 'frontmatter', label: value, fieldName: field });
                     }
                 }
             }
 
             // ── Headings (MetadataCache AST) ──────────────────────────────────
-            if (targets.headings) {
+            const H = targets.headings;
+            if (H.enabled) {
                 const cachedHeadings = cache?.headings ?? [];
-                if (display.headingOutputMode === 'heading-only') {
+                if (H.output === 'heading-only') {
                     for (const h of cachedHeadings) {
                         if (cap > 0 && matches.length >= cap) break;
                         if (tester.test(h.heading)) add({ kind: 'heading', label: h.heading });
@@ -666,13 +716,13 @@ export default class LibrarySearchPlugin extends Plugin {
                     if (hits.length) {
                         const text = await getContent();
                         if (text && cache) {
-                            const maxL = display.headingOutputMode === 'with-excerpt' ? display.excerptMaxLines : 0;
+                            const maxL = H.output === 'with-excerpt' ? H.excerptMaxLines : 0;
                             for (const h of hits) {
                                 if (cap > 0 && matches.length >= cap) break;
                                 add({
                                     kind: 'heading',
                                     label: h.heading,
-                                    sectionContent: extractSectionContentAST(text, cache, h, maxL, display.sectionMaxChars),
+                                    sectionContent: extractSectionContentAST(text, cache, h, maxL, H.sectionMaxChars),
                                 });
                             }
                         }
@@ -681,11 +731,13 @@ export default class LibrarySearchPlugin extends Plugin {
             }
 
             // ── Callouts (AST Sections) ─────────────────────────────────────
-            if (targets.calloutTitles || targets.calloutBodies) {
+            const C = targets.callouts;
+            if (C.titles || C.bodies) {
                 const calloutSections = (cache?.sections ?? []).filter(s => s.type === 'callout');
                 if (calloutSections.length > 0) {
                     const text = await getContent();
                     if (text) {
+                        const typeFilter = C.types.map(x => x.toLowerCase());
                         for (const sec of calloutSections) {
                             if (cap > 0 && matches.length >= cap) break;
 
@@ -698,22 +750,25 @@ export default class LibrarySearchPlugin extends Plugin {
                             const titleMatch = firstLine.match(/^\s*>\s*\[!([^\]]+)\][+-]?\s*(.*)$/);
 
                             if (!titleMatch) continue;
+                            const calloutType = titleMatch[1].trim().toLowerCase();
+                            if (typeFilter.length && !typeFilter.includes(calloutType)) continue;
+
                             const title = titleMatch[2].trim();
                             const bodyText = firstNl === -1 ? '' : calloutText.slice(firstNl + 1)
                                 .split('\n').map(l => l.replace(/^\s*>\s?/, '')).join('\n').trim();
 
-                            if (targets.calloutTitles && title) {
+                            if (C.titles && title) {
                                 if (tester.test(title)) add({ kind: 'callout-title', label: title });
                             }
 
-                            if (targets.calloutBodies && bodyText && (cap === 0 || matches.length < cap)) {
+                            if (C.bodies && bodyText && (cap === 0 || matches.length < cap)) {
                                 looper.lastIndex = 0;
                                 const bm = looper.exec(bodyText);
                                 if (bm) {
                                     add({
                                         kind: 'callout-body',
                                         label: title || '(untitled callout)',
-                                        snippet: display.showBodySnippet ? extractSnippet(bodyText, bm.index, display.snippetContextChars) : undefined,
+                                        snippet: C.showSnippet ? extractSnippet(bodyText, bm.index, C.snippetContextChars) : undefined,
                                     });
                                 }
                             }
@@ -723,7 +778,8 @@ export default class LibrarySearchPlugin extends Plugin {
             }
 
             // ── Full note body ────────────────────────────────────────────────
-            if (targets.noteBody && (cap === 0 || matches.length < cap)) {
+            const B = targets.body;
+            if (B.enabled && (cap === 0 || matches.length < cap)) {
                 const text = (await getContent()) ?? '';
                 const closeIdx  = text.indexOf('\n---', 3);
                 const bodyStart  = text.startsWith('---') && closeIdx !== -1
@@ -742,12 +798,48 @@ export default class LibrarySearchPlugin extends Plugin {
                     if (/^#{1,6}\s/.test(line)) continue;
                     if (/^\s*>\s*\[![^\]]+\]/.test(line)) continue;
 
-                    const snippet = display.showBodySnippet
-                        ? extractSnippet(body, bm.index, display.snippetContextChars)
+                    const snippet = B.showSnippet
+                        ? extractSnippet(body, bm.index, B.snippetContextChars)
                         : undefined;
 
                     add({ kind: 'body', label: line.trim().slice(0, 120) || '(body)', snippet });
                     break;
+                }
+            }
+
+            // ── List items / tasks (MetadataCache) ────────────────────────────
+            const L = targets.lists;
+            if (L.enabled && (cap === 0 || matches.length < cap)) {
+                const listItems = cache?.listItems ?? [];
+                if (listItems.length) {
+                    const text = await getContent();
+                    if (text) {
+                        for (const li of listItems) {
+                            if (cap > 0 && matches.length >= cap) break;
+
+                            const isTask = typeof li.task === 'string';
+                            if (isTask && !L.includeTasks) continue;
+                            if (isTask && L.onlyUnchecked && li.task !== ' ') continue;
+
+                            const raw = text.slice(li.position.start.offset, li.position.end.offset);
+                            const nl = raw.indexOf('\n');
+                            const firstLine = nl === -1 ? raw : raw.slice(0, nl);
+                            const itemText = firstLine.replace(/^\s*[-*+]\s+(\[.\]\s+)?/, '').trim();
+                            if (!itemText) continue;
+
+                            looper.lastIndex = 0;
+                            const lm = looper.exec(itemText);
+                            if (lm) {
+                                add({
+                                    kind: 'list',
+                                    label: itemText.slice(0, 160),
+                                    snippet: L.showSnippet && itemText.length > 160
+                                        ? extractSnippet(itemText, lm.index, L.snippetContextChars)
+                                        : undefined,
+                                });
+                            }
+                        }
+                    }
                 }
             }
 
@@ -786,15 +878,57 @@ export default class LibrarySearchPlugin extends Plugin {
         const loaded = await this.loadData() as Partial<LibrarySearchSettings> | null;
         this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
 
-        const DEFAULT_TARGETS: SearchTargets = { headings: true, calloutTitles: true, calloutBodies: false, frontmatterFields: [], noteBody: false, filename: false };
-        // Legacy migration: very old versions stored a single top-level `targets`
-        // object. It is no longer part of the typed settings, so read it the same
-        // defensive way as the bookTypes/articleTypes legacy reads below.
-        let legacyTargets: Partial<SearchTargets> = {};
-        if (loaded) {
-            legacyTargets = ((loaded as Record<string, unknown>).targets as Partial<SearchTargets> | undefined) ?? {};
-        }
-        const seedTargets: SearchTargets = Object.assign({}, DEFAULT_TARGETS, legacyTargets);
+        // Old global render-options (pre-overhaul DisplaySettings) — captured
+        // before merging, since DEFAULT_SETTINGS.display no longer has them.
+        // Used below to seed the per-target defaults during legacy migration.
+        const oldDisplay = (loaded?.display ?? {}) as Record<string, unknown>;
+
+        /** Bring a saved `targets` value — old flat-boolean shape, a partial
+         *  new nested shape, or undefined — up to the current SearchTargets
+         *  shape. Idempotent: running it again on an already-migrated value
+         *  is a harmless no-op merge. */
+        const migrateTargets = (rawT: unknown): SearchTargets => {
+            const out = defaultTargets();
+            const raw = (rawT ?? {}) as Record<string, unknown>;
+            const legacy = typeof raw.headings !== 'object';   // old shape stored booleans
+
+            if (legacy) {
+                out.headings.enabled = !!raw.headings;
+                out.callouts.titles  = !!raw.calloutTitles;
+                out.callouts.bodies  = !!raw.calloutBodies;
+                out.body.enabled     = !!raw.noteBody;
+                out.filename         = !!raw.filename;
+                if (Array.isArray(raw.frontmatterFields)) out.frontmatterFields = raw.frontmatterFields as string[];
+
+                // Carry the old global render options into this group's targets.
+                if (typeof oldDisplay.headingOutputMode === 'string') out.headings.output = oldDisplay.headingOutputMode as SearchTargets['headings']['output'];
+                if (typeof oldDisplay.excerptMaxLines === 'number')   out.headings.excerptMaxLines = oldDisplay.excerptMaxLines as number;
+                if (typeof oldDisplay.sectionMaxChars === 'number')   out.headings.sectionMaxChars = oldDisplay.sectionMaxChars as number;
+                if (typeof oldDisplay.showBodySnippet === 'boolean') {
+                    out.callouts.showSnippet = oldDisplay.showBodySnippet as boolean;
+                    out.body.showSnippet     = oldDisplay.showBodySnippet as boolean;
+                    out.lists.showSnippet    = oldDisplay.showBodySnippet as boolean;
+                }
+                if (typeof oldDisplay.snippetContextChars === 'number') {
+                    out.callouts.snippetContextChars = oldDisplay.snippetContextChars as number;
+                    out.body.snippetContextChars     = oldDisplay.snippetContextChars as number;
+                    out.lists.snippetContextChars    = oldDisplay.snippetContextChars as number;
+                }
+            } else {
+                Object.assign(out.headings, raw.headings);
+                Object.assign(out.callouts, raw.callouts as Record<string, unknown> | undefined);
+                Object.assign(out.body,     raw.body as Record<string, unknown> | undefined);
+                Object.assign(out.lists,    raw.lists as Record<string, unknown> | undefined);
+                if (Array.isArray(raw.frontmatterFields)) out.frontmatterFields = raw.frontmatterFields as string[];
+                if (typeof raw.filename === 'boolean')     out.filename = raw.filename;
+            }
+            return out;
+        };
+
+        // Legacy: very old versions stored a single top-level `targets` object
+        // shared by both default groups.
+        const legacyTopTargets = loaded ? (loaded as Record<string, unknown>).targets : undefined;
+
         this.settings.display  = Object.assign({}, DEFAULT_SETTINGS.display,  this.settings.display);
         this.settings.behavior = Object.assign({}, DEFAULT_SETTINGS.behavior, this.settings.behavior);
         this.settings.panel    = Object.assign({}, DEFAULT_SETTINGS.panel,    this.settings.panel);
@@ -803,14 +937,34 @@ export default class LibrarySearchPlugin extends Plugin {
 
         if (!this.settings.language) this.settings.language = 'en';
 
+        // Migrate panel.triggerFolders (pre-overhaul) → panel.scope + panel.folders.
+        // Old behaviour: empty list meant "use the library folder"; new default
+        // behaviour is "show everywhere" (scope: 'all'), so only an explicit,
+        // non-empty legacy list migrates to a restrictive scope.
+        {
+            const lp = (loaded?.panel ?? {}) as Record<string, unknown>;
+            if (Array.isArray(lp.triggerFolders) && !('scope' in lp)) {
+                const tf = (lp.triggerFolders as string[]).filter(Boolean);
+                if (tf.length > 0) {
+                    this.settings.panel.folders = tf;
+                    this.settings.panel.scope = 'only';
+                }
+            }
+            delete (this.settings.panel as unknown as Record<string, unknown>).triggerFolders;
+            if (this.settings.panel.scope !== 'only' && this.settings.panel.scope !== 'except') {
+                this.settings.panel.scope = 'all';
+            }
+            if (!Array.isArray(this.settings.panel.folders)) this.settings.panel.folders = [];
+        }
+
         if (loaded && !loaded.groups && ((loaded as Record<string, unknown>).bookTypes || (loaded as Record<string, unknown>).articleTypes)) {
             this.settings.groups = [
-                { name: 'Books',    property: 'type', values: ((loaded as Record<string, unknown>).bookTypes as string[]) ?? [],    icon: 'book-open', targets: { ...seedTargets } },
-                { name: 'Articles', property: 'type', values: ((loaded as Record<string, unknown>).articleTypes as string[]) ?? [], icon: 'file-text', targets: { ...seedTargets } },
+                { name: 'Books',    property: 'type', values: ((loaded as Record<string, unknown>).bookTypes as string[]) ?? [],    icon: 'book-open', targets: migrateTargets(legacyTopTargets) },
+                { name: 'Articles', property: 'type', values: ((loaded as Record<string, unknown>).articleTypes as string[]) ?? [], icon: 'file-text', targets: migrateTargets(legacyTopTargets) },
             ];
         }
         if (!Array.isArray(this.settings.groups) || this.settings.groups.length === 0) {
-            this.settings.groups = DEFAULT_SETTINGS.groups.map(g => ({ ...g, values: [...g.values], targets: { ...g.targets } }));
+            this.settings.groups = DEFAULT_SETTINGS.groups.map(g => ({ ...g, values: [...g.values], targets: defaultTargets() }));
         }
 
         for (const g of this.settings.groups) {
@@ -818,10 +972,10 @@ export default class LibrarySearchPlugin extends Plugin {
                 g.property = 'type';
             }
             if (!Array.isArray(g.values)) {
-                g.values = Array.isArray((g as Record<string, unknown>).types) ? (g as Record<string, unknown>).types as string[] : [];
+                g.values = Array.isArray((g as unknown as Record<string, unknown>).types) ? (g as unknown as Record<string, unknown>).types as string[] : [];
             }
-            delete (g as Record<string, unknown>).types;
-            g.targets = Object.assign({}, DEFAULT_TARGETS, g.targets ?? seedTargets);
+            delete (g as unknown as Record<string, unknown>).types;
+            g.targets = migrateTargets(g.targets ?? legacyTopTargets);
         }
     }
 
@@ -838,6 +992,7 @@ const KIND_ICON: Record<MatchKind, string> = {
     'callout-body':  'chevron-right',
     'frontmatter':   'braces',
     'body':          'align-left',
+    'list':          'list',
     'filename':      'file-text',
 };
 
@@ -1038,7 +1193,7 @@ class LibrarySearchView extends ItemView {
         this.registerEvent(
             this.app.metadataCache.on('changed', file => {
                 if (file !== this.trackedFile) return;
-                const sig = this.plugin.getSearchTerms(file).join('\u0001');
+                const sig = this.plugin.searchTermsUnion(file).join('\u0001');
                 if (sig === this.lastAliasSig) return;
                 void this.rebuild();
             }),
@@ -1086,7 +1241,7 @@ class LibrarySearchView extends ItemView {
         }
 
         this.aliases = this.trackedFile
-            ? this.plugin.getSearchTerms(this.trackedFile)
+            ? this.plugin.searchTermsUnion(this.trackedFile)
             : [];
         this.lastAliasSig = this.aliases.join('\u0001');
 
@@ -1130,7 +1285,7 @@ class LibrarySearchView extends ItemView {
         if (this.renderComp) { this.removeChild(this.renderComp); this.renderComp = null; }
         const wrap = root.createDiv('lsv-results');
 
-        if (this.aliases.length === 0) {
+        if (!this.trackedFile || this.aliases.length === 0) {
             this.baseResults = [];
             wrap.createDiv({ text: t('ui.openNote'), cls: 'lsv-muted' });
             return;
@@ -1138,7 +1293,7 @@ class LibrarySearchView extends ItemView {
 
         const loadEl = wrap.createDiv({ text: t('ui.searching'), cls: 'lsv-loading' });
         const gen     = ++this.searchGen;
-        const results = await this.plugin.searchLibrary(this.aliases);
+        const results = await this.plugin.searchLibrary(this.trackedFile);
         if (gen !== this.searchGen) return;   // stale — a newer search superseded this one
         loadEl.remove();
 
@@ -1186,7 +1341,7 @@ class LibrarySearchBlock extends MarkdownRenderChild {
             return;
         }
 
-        const aliases    = this.plugin.getSearchTerms(file);
+        const aliases    = this.plugin.searchTermsUnion(file);
         const extraTerms = this.source.split('\n').map(l => l.trim()).filter(Boolean);
         const allTerms   = [...aliases, ...extraTerms];
 
@@ -1203,7 +1358,7 @@ class LibrarySearchBlock extends MarkdownRenderChild {
         }
 
         const loadEl = el.createDiv({ text: t('ui.searching'), cls: 'lsv-loading' });
-        const results = await this.plugin.searchLibrary(allTerms);
+        const results = await this.plugin.searchLibrary(file, extraTerms);
         loadEl.remove();
 
         const wrap = el.createDiv('lsv-results');
