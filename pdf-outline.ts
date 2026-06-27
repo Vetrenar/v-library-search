@@ -278,7 +278,7 @@ export class PdfOutlineFeature {
         const files = this.allPdfs();
         const byBasename = new Map<string, TFile>();
         for (const f of files) {
-            const key = f.basename.toLowerCase().normalize('NFC');
+            const key = this.norm(f.basename);
             if (!byBasename.has(key)) byBasename.set(key, f);
         }
         this.pdfIndexCache = { files, byBasename };
@@ -295,7 +295,7 @@ export class PdfOutlineFeature {
      *  if the cache isn't  populated. */
     private findPdfByBasename(basename: string): TFile | null {
         const idx = this.getPdfIndex();
-        const key = basename.toLowerCase().normalize('NFC');
+        const key = this.norm(basename);
         return idx.byBasename.get(key) ?? null;
     }
 

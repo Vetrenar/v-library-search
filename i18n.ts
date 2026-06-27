@@ -16,6 +16,15 @@ export const TRANSLATIONS: Record<string, { en: string; ru: string }> = {
     'settings.guideStep1':             { en: '1. You open a note — the plugin reads its search terms (aliases, or a property you choose).', ru: '1. Вы открываете заметку — плагин берёт из неё термины поиска (алиасы или выбранное свойство).' },
     'settings.guideStep2':             { en: '2. It scans the library notes and sorts matches into your groups.', ru: '2. Он сканирует заметки библиотеки и раскладывает совпадения по вашим группам.' },
     'settings.guideStep3':             { en: '3. Matches appear in the inline panel and the side view.', ru: '3. Совпадения показываются во встроенной панели и боковой панели.' },
+
+    // ── Settings: tab bar ─────────────────────────────────────────
+    'settings.tabStart':               { en: 'Start',                   ru: 'Старт' },
+    'settings.tabPdf':                 { en: 'PDF index',               ru: 'PDF-индекс' },
+    'settings.tabTypes':               { en: 'Note types',              ru: 'Типы заметок' },
+    'settings.tabSearch':              { en: 'Search',                  ru: 'Поиск' },
+    'settings.tabView':                { en: 'Display',                 ru: 'Вид' },
+    'settings.tabMore':                { en: 'More',                    ru: 'Ещё' },
+
     'settings.sources':                { en: 'Sources',          ru: 'Источники' },
     'settings.sourcesDesc':            { en: 'Where the searchable notes come from.', ru: 'Откуда берутся заметки для поиска.' },
     'settings.matching':               { en: 'Search & groups',  ru: 'Поиск и группы' },
@@ -25,6 +34,10 @@ export const TRANSLATIONS: Record<string, { en: string; ru: string }> = {
     'settings.general':                { en: 'General',          ru: 'Общее' },
     'settings.pdfSection':             { en: 'PDF index → cards', ru: 'PDF-индекс → карточки' },
     'settings.pdfIntro':               { en: 'Creates one card note per PDF, with its table of contents as headings. These cards become notes the search above indexes.', ru: 'Создаёт по карточке-заметке на каждый PDF с оглавлением в виде заголовков. Эти карточки становятся заметками, по которым ищет поиск выше.' },
+    'settings.pdfCalloutTitle':        { en: 'Building a library from PDFs?', ru: 'Строите библиотеку из PDF?' },
+    'settings.pdfCalloutBody':         { en: 'The plugin creates one card note per PDF and writes its outline into it. First set the folders and card format, then run indexing — search then works over the created cards.', ru: 'Плагин создаёт по заметке-карточке на каждый PDF и записывает в неё оглавление. Сначала задайте папки и формат карточек, затем запустите индексацию — дальше поиск работает по созданным карточкам.' },
+    'settings.pdfCalloutBtn':          { en: 'Open PDF index',          ru: 'Открыть PDF-индекс' },
+    'settings.pdfBackCallout':         { en: 'These settings create card notes from PDFs and fill them with the outline. When ready, run "Rebuild folder" or add a PDF to the watched folder.', ru: 'Эти настройки создают карточки из PDF и кладут в них оглавление. После настройки запустите «Перестроить папку» или добавьте PDF в отслеживаемую папку.' },
 
     // ── Settings: Library ────────────────────────────────────────
     'settings.library':                { en: 'Library',                 ru: 'Библиотека' },
@@ -58,6 +71,7 @@ export const TRANSLATIONS: Record<string, { en: string; ru: string }> = {
     'settings.deleteGroup':            { en: 'Delete group',            ru: 'Удалить группу' },
     'settings.addGroup':               { en: '+ Add group',             ru: '+ Добавить группу' },
     'settings.newGroup':               { en: 'New group',               ru: 'Новая группа' },
+    'settings.groupPropertyHint':      { en: 'Groups filter cards by a property (e.g. type: book). Make sure the PDF card template sets this property — otherwise the card won\'t join any group and won\'t be found.', ru: 'Группы фильтруют карточки по свойству (напр. type: book). Убедитесь, что шаблон карточки PDF добавляет это свойство — иначе карточка не попадёт в группу и не будет найдена.' },
 
     // ── Settings: Search targets per group ───────────────────────
     'settings.whereToSearch':          { en: 'Where to search in files of this group', ru: 'Где искать совпадения в файлах этой группы' },
@@ -132,8 +146,11 @@ export const TRANSLATIONS: Record<string, { en: string; ru: string }> = {
     'settings.searchBehavior':         { en: 'Search behavior',         ru: 'Поведение поиска' },
     'settings.caseSensitive':          { en: 'Case sensitive',          ru: 'Учитывать регистр' },
     'settings.caseSensitiveDesc':      { en: 'Search with exact letter case. When off, "cat" also matches "Cat" or "CAT".', ru: 'Искать с учётом точного регистра букв. Если выключено, «кот» также совпадёт с «Кот» или «КОТ». Рекомендуется оставить выключенным для русского языка.' },
-    'settings.wholeWord':              { en: 'Whole words only',        ru: 'Только целые слова' },
-    'settings.wholeWordDesc':          { en: 'Match only complete words. When on, "cat" will NOT match inside "catfish".', ru: 'Совпадение только с полными словами. При включении «кот» НЕ будет найден внутри слова «котёнок». Работает через границы слов (\\b).' },
+    'settings.matchMode':              { en: 'Match mode',              ru: 'Режим совпадения' },
+    'settings.matchModeDesc':          { en: 'How alias text is matched. "Word forms" also matches inflected forms of each word (e.g. "red dog" → "red dogs").', ru: 'Как сопоставляется текст алиаса. «Словоформы» также находит склонения каждого слова (рыжая собака → рыжей собаки, рыжих собак).' },
+    'settings.matchSubstring':         { en: 'Substring (max recall)',  ru: 'Подстрока (максимум совпадений)' },
+    'settings.matchStem':              { en: 'Word forms (inflection-aware)', ru: 'Словоформы (учёт склонений)' },
+    'settings.matchWhole':             { en: 'Whole word (exact)',       ru: 'Целое слово (точно)' },
     'settings.maxMatchesPerFile':      { en: 'Max matches per file',    ru: 'Макс. совпадений на файл' },
     'settings.maxMatchesPerFileDesc':  { en: 'Stop collecting matches from one file after this count. 0 = collect all. Limiting speeds up search in large files with many repetitions.', ru: 'Прекратить сбор совпадений из одного файла после достижения этого количества. 0 = собирать все совпадения. Ограничение ускоряет поиск в больших файлах с множеством повторений.' },
 

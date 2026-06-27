@@ -2,7 +2,7 @@
 {
 	"id": "library-search",
 	"name": "Library Search",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"minAppVersion": "1.4.4",
 	"description": "Search your vault by terms from the active note (aliases or custom property). Group results by type, search in headings, callouts, lists, tasks, and body text. Includes inline panel, side view, and PDF outline indexing.",
 	"author": "Vetrenar",

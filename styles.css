@@ -474,3 +474,44 @@ PDF OUTLINE — Settings UI styles (was injectPdfOutlineSettingsStyles)
 .pdfo-ph-table{border-collapse:collapse;margin-top:8px;width:100%}
 .pdfo-ph-table td{padding:3px 8px;border-bottom:1px solid var(--background-modifier-border);vertical-align:top;font-size:.9em}
 .pdfo-ph-token{font-family:var(--font-monospace);color:var(--text-accent);white-space:nowrap}
+/* ═══════════════════════════════════════════════════════════════════════════
+SETTINGS — tab bar + inline notes (callouts)
+═══════════════════════════════════════════════════════════════════════════ */
+.lsv-settings-tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 1rem;padding-bottom:10px;
+border-bottom:1px solid var(--background-modifier-border)}
+.lsv-settings-tab{padding:5px 12px;font-size:13px;cursor:pointer;border-radius:6px;
+border:1px solid transparent;background:transparent;color:var(--text-muted);box-shadow:none}
+.lsv-settings-tab:hover{color:var(--text-normal);background:var(--background-modifier-hover)}
+.lsv-settings-tab.is-active{color:var(--text-on-accent);background:var(--interactive-accent);
+border-color:var(--interactive-accent)}
+.lsv-settings-tab.is-active:hover{background:var(--interactive-accent-hover);color:var(--text-on-accent)}
+
+.lsv-note{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;margin:14px 0;
+border-radius:6px;border:1px solid var(--background-modifier-border);border-left-width:3px;
+background:var(--background-secondary)}
+.lsv-note--accent{border-left-color:var(--interactive-accent)}
+.lsv-note--warning{border-left-color:var(--text-warning)}
+.lsv-note-icon{display:flex;flex-shrink:0;padding-top:1px;color:var(--interactive-accent)}
+.lsv-note--warning .lsv-note-icon{color:var(--text-warning)}
+.lsv-note-content{min-width:0}
+.lsv-note-title{font-weight:600;color:var(--text-normal);margin-bottom:3px}
+.lsv-note-body{color:var(--text-muted);font-size:var(--font-ui-small);line-height:1.5}
+.lsv-note-btn{margin-top:8px}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+SETTINGS — tasteful theme-color accents for important logical groups
+(section headings and "note type" group cards). Uses theme variables only.
+═══════════════════════════════════════════════════════════════════════════ */
+/* Section headings within the plugin's settings — accent bar + accent label */
+.lsv-settings .setting-item-heading{
+border-left:3px solid var(--interactive-accent);
+padding-left:10px;margin-top:10px}
+.lsv-settings .setting-item-heading .setting-item-name{
+color:var(--text-accent);font-weight:600}
+
+/* Group ("note type") cards — accent bar + emphasized group name + tinted icon */
+.lsv-group-card{border-left:3px solid var(--interactive-accent)}
+.lsv-group-id-row .setting-item-control input[type="text"]{
+font-weight:600;color:var(--text-normal);font-size:1.05em}
+.lsv-group-id-row .lsv-icon-picker-btn{color:var(--text-accent)}
+.lsv-group-id-row .lsv-icon-picker-btn:hover{color:var(--interactive-accent)}

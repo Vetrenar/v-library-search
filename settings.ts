@@ -89,9 +89,18 @@ export interface DisplaySettings {
     groupByType: boolean;
 }
 
+/** Как текст алиаса сопоставляется с текстом заметки.
+ *  'substring' — фраза как подстрока, без границ слова (максимум совпадений);
+ *  'whole'     — фраза целиком с границами слова (точно, без словоформ);
+ *  'stem'      — каждое слово алиаса усекается до основы, окончание свободно,
+ *                поэтому совпадают словоформы: «рыжая собака» → «рыжей собаки» … */
+export type MatchMode = 'substring' | 'stem' | 'whole';
+
 export interface BehaviorSettings {
     caseSensitive: boolean;
+    /** @deprecated оставлено для миграции в `matchMode`. */
     wholeWord: boolean;
+    matchMode: MatchMode;
     maxMatchesPerFile: number;
 }
 
@@ -155,6 +164,7 @@ export const DEFAULT_SETTINGS: LibrarySearchSettings = {
     behavior: {
         caseSensitive: false,
         wholeWord: false,
+        matchMode: 'substring',
         maxMatchesPerFile: 0,
     },
     panel: {
@@ -247,9 +257,14 @@ class IconPickerModal extends Modal {
 
 /* ─── Settings tab ──────────────────────────────────────────────────────── */
 
+/** Вкладки таба настроек. Порядок = сценарий настройки:
+ *  собрать библиотеку (start → pdf → types), затем как искать и показывать. */
+type SettingsTab = 'start' | 'pdf' | 'types' | 'search' | 'view' | 'more';
+
 export class LibrarySearchSettingTab extends PluginSettingTab {
     constructor(app: App, private plugin: LibrarySearchPlugin) { super(app, plugin); }
 
+    private activeTab: SettingsTab = 'start';
     private saveDebounced    = debounce(() => { void this.plugin.saveSettings(); }, 400, false);
     private refreshDebounced = debounce(() => { this.plugin.refreshPanels(true); }, 400, false);
 
@@ -287,21 +302,65 @@ export class LibrarySearchSettingTab extends PluginSettingTab {
         setTooltip(icon, text);
     }
 
+    /** Switch the active tab and re-render. */
+    private setActiveTab(tab: SettingsTab) {
+        this.activeTab = tab;
+        this.display();
+    }
+
+    /** Tab bar across the top; only the active tab's section renders below. */
+    private renderTabBar(el: HTMLElement) {
+        const tabs: { id: SettingsTab; label: string }[] = [
+            { id: 'start',  label: t('settings.tabStart') },
+            { id: 'pdf',    label: t('settings.tabPdf') },
+            { id: 'types',  label: t('settings.tabTypes') },
+            { id: 'search', label: t('settings.tabSearch') },
+            { id: 'view',   label: t('settings.tabView') },
+            { id: 'more',   label: t('settings.tabMore') },
+        ];
+        const bar = el.createDiv({ cls: 'lsv-settings-tabs' });
+        for (const tab of tabs) {
+            const btn = bar.createEl('button', { text: tab.label, cls: 'lsv-settings-tab' });
+            btn.toggleClass('is-active', this.activeTab === tab.id);
+            btn.onclick = () => this.setActiveTab(tab.id);
+        }
+    }
+
+    /** Inline note/callout. `action`, if given, renders a button that jumps to
+     *  another tab — used to wire the PDF-index workflow to the search setup. */
+    private note(
+        el: HTMLElement,
+        variant: 'accent' | 'warning',
+        icon: string,
+        title: string,
+        body: string,
+        action?: { label: string; tab: SettingsTab },
+    ) {
+        const box = el.createDiv({ cls: `lsv-note lsv-note--${variant}` });
+        const ic = box.createSpan({ cls: 'lsv-note-icon' });
+        setIcon(ic, icon);
+        const content = box.createDiv({ cls: 'lsv-note-content' });
+        if (title) content.createDiv({ text: title, cls: 'lsv-note-title' });
+        content.createDiv({ text: body, cls: 'lsv-note-body' });
+        if (action) {
+            const btn = content.createEl('button', { text: action.label, cls: 'lsv-note-btn' });
+            btn.onclick = () => this.setActiveTab(action.tab);
+        }
+    }
+
     display() {
         const { containerEl: el } = this;
         const s = this.plugin.settings;
         el.empty();
+        el.addClass('lsv-settings');
+        this.renderTabBar(el);
 
+        if (this.activeTab === 'start') {
         /* ── Intro: how it works ───────────────────────────────────────── */
         const guide = el.createDiv({ cls: 'pdfo-guide setting-item-description' });
         guide.createDiv({ text: t('settings.guideTitle'), cls: 'pdfo-guide-title' });
         ['settings.guideStep1', 'settings.guideStep2', 'settings.guideStep3']
             .forEach(k => guide.createDiv({ text: t(k), cls: 'pdfo-guide-step' }));
-
-        /* ════════════════════════════════════════════════════════════════
-           BAND 1 — SOURCES: where the searchable notes come from
-        ═══════════════════════════════════════════════════════════════════ */
-        this.band(el, t('settings.sources'), t('settings.sourcesDesc'));
 
         new Setting(el)
             .setName(t('settings.libraryFolder'))
@@ -311,17 +370,23 @@ export class LibrarySearchSettingTab extends PluginSettingTab {
                 this.saveDebounced();
             }));
 
-        // The PDF index lives here: it produces the card notes (with their
-        // Contents headings) that the search below indexes.
+        // Связка вперёд: построение библиотеки из PDF начинается с настройки
+        // папок и формата карточек на вкладке «PDF-индекс».
+        this.note(el, 'accent', 'file-stack',
+            t('settings.pdfCalloutTitle'), t('settings.pdfCalloutBody'),
+            { label: t('settings.pdfCalloutBtn'), tab: 'pdf' });
+        } // end tab: start
+
+        if (this.activeTab === 'pdf') {
+        // Связка обратно: эти настройки создают карточки-заметки из PDF и кладут
+        // в них оглавление — по ним потом работает поиск.
+        this.note(el, 'accent', 'info', '', t('settings.pdfBackCallout'));
         new Setting(el).setName(t('settings.pdfSection')).setHeading();
         el.createDiv({ text: t('settings.pdfIntro'), cls: 'setting-item-description' });
         renderPdfOutlineSettings(el, s.pdfOutline, () => this.saveFlushed());
+        } // end tab: pdf
 
-        /* ════════════════════════════════════════════════════════════════
-           BAND 2 — MATCHING: terms, groups, and search behaviour
-        ═══════════════════════════════════════════════════════════════════ */
-        this.band(el, t('settings.matching'), t('settings.matchingDesc'));
-
+        if (this.activeTab === 'types') {
         /* ── Search-term source (global default) ───────────────────────── */
         let termPropSetting: Setting;
         new Setting(el)
@@ -597,25 +662,37 @@ export class LibrarySearchSettingTab extends PluginSettingTab {
         };
         renderGroups();
 
+        // Подсказка: группы фильтруют карточки по свойству; шаблон карточки PDF
+        // должен это свойство проставлять, иначе карточка не попадёт в группу.
+        this.note(el, 'warning', 'alert-triangle', '', t('settings.groupPropertyHint'));
+        } // end tab: types
+
+        if (this.activeTab === 'search') {
         /* ── Search behaviour (applies to all groups) ──────────────────── */
         new Setting(el).setName(t('settings.searchBehavior')).setHeading();
 
         new Setting(el).setName(t('settings.caseSensitive')).setDesc(t('settings.caseSensitiveDesc'))
             .addToggle(toggle => toggle.setValue(s.behavior.caseSensitive).onChange(async v => { s.behavior.caseSensitive = v; await this.saveFlushed(); }));
 
-        new Setting(el).setName(t('settings.wholeWord')).setDesc(t('settings.wholeWordDesc'))
-            .addToggle(toggle => toggle.setValue(s.behavior.wholeWord).onChange(async v => { s.behavior.wholeWord = v; await this.saveFlushed(); }));
+        new Setting(el).setName(t('settings.matchMode')).setDesc(t('settings.matchModeDesc'))
+            .addDropdown(d => d
+                .addOption('substring', t('settings.matchSubstring'))
+                .addOption('stem',      t('settings.matchStem'))
+                .addOption('whole',     t('settings.matchWhole'))
+                .setValue(s.behavior.matchMode ?? (s.behavior.wholeWord ? 'whole' : 'substring'))
+                .onChange(async v => {
+                    s.behavior.matchMode = v as MatchMode;
+                    s.behavior.wholeWord = v === 'whole';   // держим старое поле в согласии
+                    await this.saveFlushed();
+                }));
 
         new Setting(el).setName(t('settings.maxMatchesPerFile')).setDesc(t('settings.maxMatchesPerFileDesc'))
             .addText(text => text.setValue(String(s.behavior.maxMatchesPerFile)).onChange(v => {
                 const n = parseInt(v, 10); if (!isNaN(n) && n >= 0) { s.behavior.maxMatchesPerFile = n; this.saveDebounced(); }
             }));
+        } // end tab: search
 
-        /* ════════════════════════════════════════════════════════════════
-           BAND 3 — PRESENTATION: where & how results appear
-        ═══════════════════════════════════════════════════════════════════ */
-        this.band(el, t('settings.presentation'), t('settings.presentationDesc'));
-
+        if (this.activeTab === 'view') {
         /* ── Inline note panel ─────────────────────────────────────────── */
         new Setting(el).setName(t('settings.inlinePanel')).setHeading();
 
@@ -668,12 +745,9 @@ export class LibrarySearchSettingTab extends PluginSettingTab {
 
         new Setting(el).setName(t('settings.showFilePath')).setDesc(t('settings.showFilePathDesc'))
             .addToggle(toggle => toggle.setValue(s.display.showFilePath).onChange(async v => { s.display.showFilePath = v; await this.saveFlushed(); }));
+        } // end tab: view
 
-        /* ════════════════════════════════════════════════════════════════
-           GENERAL
-        ═══════════════════════════════════════════════════════════════════ */
-        this.band(el, t('settings.general'));
-
+        if (this.activeTab === 'more') {
         new Setting(el)
             .setName(t('settings.language'))
             .setDesc(t('settings.languageDesc'))
@@ -688,5 +762,6 @@ export class LibrarySearchSettingTab extends PluginSettingTab {
                     this.display();
                     this.plugin.refreshPanels(true);
                 }));
+        } // end tab: more
     }
 }

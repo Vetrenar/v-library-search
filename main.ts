@@ -61,6 +61,10 @@ interface Match {
     snippet?:        string;
     /** Text below a matched heading (only when mode != heading-only) */
     sectionContent?: string;
+    /** Raw heading line incl. any inline links (e.g. [[pdf-…#page=N]]).
+     *  Provided only in the non-heading-only branch where file content is loaded;
+     *  lets headless callers resolve the linked PDF chapter without re-reading. */
+    headingRaw?:     string;
 }
 
 interface SearchResult {
@@ -78,7 +82,7 @@ function filterTokens(raw: string, caseSensitive: boolean): string[] {
         .split(/[,\s]+/)
         .map(s => s.trim())
         .filter(Boolean)
-        .map(s => caseSensitive ? s : s.toLowerCase());
+        .map(s => caseSensitive ? s.normalize('NFC') : s.normalize('NFC').toLowerCase());
 }
 
 /** Flatten everything a result shows on screen into one haystack, so the
@@ -97,7 +101,7 @@ function resultHaystack(r: SearchResult): string {
 /** True if every token is found somewhere in the result (AND, not OR). */
 function resultMatchesTokens(r: SearchResult, tokens: string[], caseSensitive: boolean): boolean {
     if (tokens.length === 0) return true;
-    const hay = caseSensitive ? resultHaystack(r) : resultHaystack(r).toLowerCase();
+    const hay = caseSensitive ? resultHaystack(r).normalize('NFC') : resultHaystack(r).normalize('NFC').toLowerCase();
     return tokens.every(tok => hay.includes(tok));
 }
 
@@ -105,16 +109,112 @@ function resultMatchesTokens(r: SearchResult, tokens: string[], caseSensitive: b
 PURE HELPERS
 ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Build two RegExp objects — one for .test() (no /g), one for exec-loops (/g). */
-function buildPatterns(terms: string[], b: BehaviorSettings) {
-    const escaped = terms.map(t => t.trim().replace(/[.+?^${}()|[\]\\]/g, '\\$&'));
-    const patterns = b.wholeWord ? escaped.map(t => `\\b${t}\\b`) : escaped;
-    const src   = patterns.join('|');
-    const flags = b.caseSensitive ? '' : 'i';
-    return {
-        tester: new RegExp(src, flags),
-        looper: new RegExp(src, 'g' + flags),
-    };
+/** Build two RegExp objects — one for .test() (no /g), one for exec-loops (/g).
+ *
+ *  [FIX CYR-1] Unicode-aware word boundaries.
+ *
+ *  Прежний код использовал `\b${term}\b` для wholeWord-режима. В JavaScript
+ *  `\b` — это граница между `\w` и не-`\w`, где `\w = [a-zA-Z0-9_]` —
+ *  НЕ включает кириллицу (и вообще любой не-ASCII алфавит). Поэтому:
+ *
+ *    `\bhemangiosarcoma\b`  →  матчит " hemangiosarcoma "  ✅
+ *    `\bгемангиосаркома\b`  →  НЕ матчит " гемангиосаркома "
+ *                                (г — не \w, пробел — не \w, "границы" нет)
+ *
+ *  Это приводило к тихому промаху поиска по любому кириллическому
+ *  термину в wholeWord-режиме — заметка с basename "Гемангиосаркома"
+ *  не находилась, даже когда в library-файлах было точное слово
+ *  "гемангиосаркома" в заголовке.
+ *
+ *  Замена: явные boundary-классы через `\p{L}` (любая буква Unicode)
+ *  и `\p{N}` (любая цифра Unicode), с флагом `u`. Это корректно
+ *  работает с кириллицей, латиницей, греческим, CJK и т.д.
+ *
+ *  Совместимость: `\p{...}` поддерживается во всех современных браузерах
+ *  и Node.js 12+. Obsidian Electron использует современный V8 — поддерживается.
+ */
+/** Unicode-нормализация к NFC. Регэкспы сопоставляются по кодпойнтам, поэтому
+ *  термин и текст-цель должны быть в одной форме — иначе «й/ё» и латиница с
+ *  диакритикой молча не совпадают (NFC vs NFD). */
+const nfc = (s: string) => s.normalize('NFC');
+
+const WORD_CHAR   = '\\p{L}\\p{N}_';
+const LEFT_BOUND  = `(?<![${WORD_CHAR}])`;   // lookbehind — НЕ потребляет символ
+const RIGHT_BOUND = `(?![${WORD_CHAR}])`;    // lookahead  — НЕ потребляет символ
+const INNER_SEP   = '[\\s\\-—]+';            // разделитель между словами фразы
+
+/** Экранирование спецсимволов RegExp. (В прежней версии не хватало '*', из-за
+ *  чего алиас со звёздочкой под флагом 'u' бросал «nothing to repeat».) */
+function escapeRe(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Очень лёгкий стеммер русского: срезает самое длинное распространённое
+ *  окончание, не опускаясь ниже MIN_STEM букв. Нерусские слова не трогаем —
+ *  для них основой служит само слово, а словоформы добирает свободный хвост
+ *  \p{L}* (англ. dog → dogs). Это эвристика, а не морфоанализатор: возможны
+ *  лишние совпадения (рана → рано), что для поиска приемлемо (recall > precision). */
+const RU_ENDINGS = [
+    'ого','его','ому','ему','ыми','ими',
+    'ая','яя','ое','ее','ые','ие','ой','ей','ый','ий','ом','ем','ах','ях','ам','ям','ов','ев','ёв','ую','юю','ью',
+    'а','я','о','е','ы','и','у','ю','й','ь',
+].sort((a, b) => b.length - a.length);
+const HAS_CYRILLIC = /\p{Script=Cyrillic}/u;
+const MIN_STEM = 3;
+
+function stemWord(word: string): string {
+    if (!HAS_CYRILLIC.test(word)) return word;
+    const lower = word.toLowerCase();          // для кириллицы длина сохраняется
+    for (const end of RU_ENDINGS) {
+        if (lower.length - end.length >= MIN_STEM && lower.endsWith(end)) {
+            return word.slice(0, word.length - end.length);
+        }
+    }
+    return word;
+}
+
+/** Один алиас → под-паттерн согласно режиму. Многословные алиасы обрабатываются
+ *  пословно, порядок и смежность слов сохраняются (через INNER_SEP). */
+function aliasToPattern(alias: string, mode: BehaviorSettings['matchMode']): string {
+    const words = alias.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return '';
+
+    if (mode === 'substring') {
+        // Фраза как подстрока: без границ слова, гибкий внутренний разделитель.
+        return words.map(escapeRe).join(INNER_SEP);
+    }
+    if (mode === 'whole') {
+        // Фраза целиком с границами слова: точно, но без словоформ.
+        return `${LEFT_BOUND}(?:${words.map(escapeRe).join(INNER_SEP)})${RIGHT_BOUND}`;
+    }
+    // 'stem': каждое слово = основа + свободное окончание; якорь по началу фразы.
+    // "рыжая собака" → (?<!w)рыж\p{L}*[\s\-—]+собак\p{L}*  → ловит "рыжей собаки" и т.д.
+    const parts = words.map(w => `${escapeRe(stemWord(w))}\\p{L}*`);
+    return `${LEFT_BOUND}${parts.join(INNER_SEP)}`;
+}
+
+/** Build two RegExp objects — one for .test() (no /g), one for exec-loops (/g).
+ *  Возвращает null при пустом/невалидном наборе — один битый алиас НЕ должен
+ *  ронять поиск по всему файлу. Все термины приводятся к NFC. */
+function buildPatterns(terms: string[], b: BehaviorSettings): { tester: RegExp; looper: RegExp } | null {
+    const mode = b.matchMode ?? (b.wholeWord ? 'whole' : 'substring');
+    const subs = terms
+        .map(t => nfc(t))
+        .map(t => aliasToPattern(t, mode))
+        .filter(Boolean);
+    if (!subs.length) return null;
+
+    const src   = subs.map(s => `(?:${s})`).join('|');
+    const flags = (b.caseSensitive ? '' : 'i') + 'u';
+    try {
+        return {
+            tester: new RegExp(src, flags),
+            looper: new RegExp(src, 'g' + flags),
+        };
+    } catch (e) {
+        console.error('[Library Search] invalid search pattern; terms:', terms, e);
+        return null;
+    }
 }
 
 /**
@@ -589,9 +689,15 @@ export default class LibrarySearchPlugin extends Plugin {
             return (Array.isArray(raw) ? raw : [raw]).map(String).map(s => s.trim()).filter(Boolean);
         }
 
-        const raw: unknown = fm['aliases'] ?? fm['alias'] ?? fm['Aliases'] ?? fm['Alias'];
-        if (raw == null) return [];
-        return (Array.isArray(raw) ? raw : [raw]).map(String).map(s => s.trim()).filter(Boolean);
+        // Объединяем все варианты ключа алиасов, а не берём первый непустой:
+        // файл может иметь и `aliases`, и `Aliases` — учитываем оба.
+        const ALIAS_KEYS = ['aliases', 'alias', 'Aliases', 'Alias'];
+        const collected = ALIAS_KEYS.flatMap(k => {
+            const v: unknown = fm[k];
+            return v == null ? [] : (Array.isArray(v) ? v : [v]);
+        });
+        if (collected.length === 0) return [];
+        return collected.map(String).map(s => s.trim()).filter(Boolean);
     }
 
     /** Distinct term sources actually in use: the global default (if any group
@@ -617,8 +723,10 @@ export default class LibrarySearchPlugin extends Plugin {
         const seen = new Set<string>();
         const out: string[] = [];
         for (const src of this.effectiveSources())
-            for (const term of this.getSearchTerms(file, src))
-                if (!seen.has(term)) { seen.add(term); out.push(term); }
+            for (const term of this.getSearchTerms(file, src)) {
+                const key = term.normalize('NFC');   // дедуп по нормализованной форме
+                if (!seen.has(key)) { seen.add(key); out.push(term); }
+            }
         return out;
     }
 
@@ -627,7 +735,7 @@ export default class LibrarySearchPlugin extends Plugin {
      *  group's query alongside that group's own term-source terms. The
      *  panel and side-view instead apply extra terms as a client-side AND
      *  filter over the returned results — see filterTokens/resultMatchesTokens. */
-    async searchLibrary(activeFile: TFile, extraTerms: string[] = []): Promise<SearchResult[]> {
+    async searchLibrary(activeFile: TFile | null, extraTerms: string[] = [], termsOverride?: string[]): Promise<SearchResult[]> {
         const { behavior } = this.settings;
         const cap = behavior.maxMatchesPerFile;
         const results: SearchResult[] = [];
@@ -639,7 +747,10 @@ export default class LibrarySearchPlugin extends Plugin {
             const key = `${src.source}\u0000${src.property}`;
             let entry = patternCache.get(key);
             if (entry === undefined) {
-                const terms = [...this.getSearchTerms(activeFile, src), ...extraTerms];
+                // termsOverride → поиск по произвольным терминам (свободный запрос
+                // чата) без привязки к заметке; иначе термины берутся из activeFile.
+                const baseTerms = termsOverride ?? (activeFile ? this.getSearchTerms(activeFile, src) : []);
+                const terms = [...baseTerms, ...extraTerms];
                 entry = terms.length ? buildPatterns(terms, behavior) : null;
                 patternCache.set(key, entry);
             }
@@ -687,7 +798,7 @@ export default class LibrarySearchPlugin extends Plugin {
             };
 
             // ── Filename ─────────────────────────────────────────────────────
-            if (targets.filename && tester.test(file.basename)) {
+            if (targets.filename && tester.test(nfc(file.basename))) {
                 add({ kind: 'filename', label: file.basename });
             }
 
@@ -696,7 +807,7 @@ export default class LibrarySearchPlugin extends Plugin {
                 for (const field of targets.frontmatterFields) {
                     if (cap > 0 && matches.length >= cap) break;
                     const value = String(fm[field] ?? '');
-                    if (value && tester.test(value)) {
+                    if (value && tester.test(nfc(value))) {
                         add({ kind: 'frontmatter', label: value, fieldName: field });
                     }
                 }
@@ -709,10 +820,10 @@ export default class LibrarySearchPlugin extends Plugin {
                 if (H.output === 'heading-only') {
                     for (const h of cachedHeadings) {
                         if (cap > 0 && matches.length >= cap) break;
-                        if (tester.test(h.heading)) add({ kind: 'heading', label: h.heading });
+                        if (tester.test(nfc(h.heading))) add({ kind: 'heading', label: h.heading });
                     }
                 } else {
-                    const hits = cachedHeadings.filter(h => tester.test(h.heading));
+                    const hits = cachedHeadings.filter(h => tester.test(nfc(h.heading)));
                     if (hits.length) {
                         const text = await getContent();
                         if (text && cache) {
@@ -723,6 +834,9 @@ export default class LibrarySearchPlugin extends Plugin {
                                     kind: 'heading',
                                     label: h.heading,
                                     sectionContent: extractSectionContentAST(text, cache, h, maxL, H.sectionMaxChars),
+                                    // Raw heading line (incl. inline [[pdf-…#page=N]] links) —
+                                    // free here since `text` is already loaded.
+                                    headingRaw: text.slice(h.position.start.offset, h.position.end.offset),
                                 });
                             }
                         }
@@ -758,17 +872,18 @@ export default class LibrarySearchPlugin extends Plugin {
                                 .split('\n').map(l => l.replace(/^\s*>\s?/, '')).join('\n').trim();
 
                             if (C.titles && title) {
-                                if (tester.test(title)) add({ kind: 'callout-title', label: title });
+                                if (tester.test(nfc(title))) add({ kind: 'callout-title', label: title });
                             }
 
                             if (C.bodies && bodyText && (cap === 0 || matches.length < cap)) {
+                                const bodyHay = nfc(bodyText);
                                 looper.lastIndex = 0;
-                                const bm = looper.exec(bodyText);
+                                const bm = looper.exec(bodyHay);
                                 if (bm) {
                                     add({
                                         kind: 'callout-body',
                                         label: title || '(untitled callout)',
-                                        snippet: C.showSnippet ? extractSnippet(bodyText, bm.index, C.snippetContextChars) : undefined,
+                                        snippet: C.showSnippet ? extractSnippet(bodyHay, bm.index, C.snippetContextChars) : undefined,
                                     });
                                 }
                             }
@@ -781,11 +896,10 @@ export default class LibrarySearchPlugin extends Plugin {
             const B = targets.body;
             if (B.enabled && (cap === 0 || matches.length < cap)) {
                 const text = (await getContent()) ?? '';
-                const closeIdx  = text.indexOf('\n---', 3);
-                const bodyStart  = text.startsWith('---') && closeIdx !== -1
-                    ? closeIdx + 4
-                    : 0;
-                const body = text.slice(bodyStart);
+                // Конец frontmatter берём из кэша — надёжнее, чем искать '\n---',
+                // который может совпасть с тематическим разделителем в тексте.
+                const bodyStart = cache?.frontmatterPosition?.end.offset ?? 0;
+                const body = nfc(text.slice(bodyStart));
 
                 looper.lastIndex = 0;
                 let bm: RegExpExecArray | null;
@@ -827,14 +941,15 @@ export default class LibrarySearchPlugin extends Plugin {
                             const itemText = firstLine.replace(/^\s*[-*+]\s+(\[.\]\s+)?/, '').trim();
                             if (!itemText) continue;
 
+                            const itemHay = nfc(itemText);
                             looper.lastIndex = 0;
-                            const lm = looper.exec(itemText);
+                            const lm = looper.exec(itemHay);
                             if (lm) {
                                 add({
                                     kind: 'list',
                                     label: itemText.slice(0, 160),
-                                    snippet: L.showSnippet && itemText.length > 160
-                                        ? extractSnippet(itemText, lm.index, L.snippetContextChars)
+                                    snippet: L.showSnippet && itemHay.length > 160
+                                        ? extractSnippet(itemHay, lm.index, L.snippetContextChars)
                                         : undefined,
                                 });
                             }
@@ -861,6 +976,18 @@ export default class LibrarySearchPlugin extends Plugin {
         return results.sort((a, b) =>
             a.noteName.localeCompare(b.noteName, undefined, { sensitivity: 'base' }),
         );
+    }
+
+    /**
+     * [#2] Term-anchored library search WITHOUT a TFile anchor — for a free-text
+     * query (e.g. a chat question). Searches library files by the given terms
+     * only; no note's own search-terms are mixed in, so there's no anchor-file
+     * noise. Returns the same SearchResult[] shape as searchLibrary().
+     */
+    async searchByTerms(terms: string[]): Promise<SearchResult[]> {
+        const clean = (terms || []).map(t => String(t).trim()).filter(t => t.length >= 3);
+        if (clean.length === 0) return [];
+        return this.searchLibrary(null, [], clean);
     }
 
     effectiveLibraryFolder(): string {
@@ -931,6 +1058,10 @@ export default class LibrarySearchPlugin extends Plugin {
 
         this.settings.display  = Object.assign({}, DEFAULT_SETTINGS.display,  this.settings.display);
         this.settings.behavior = Object.assign({}, DEFAULT_SETTINGS.behavior, this.settings.behavior);
+        // Миграция: старый булев wholeWord → новый трёхрежимный matchMode.
+        if (!this.settings.behavior.matchMode) {
+            this.settings.behavior.matchMode = this.settings.behavior.wholeWord ? 'whole' : 'substring';
+        }
         this.settings.panel    = Object.assign({}, DEFAULT_SETTINGS.panel,    this.settings.panel);
         this.settings.terms    = Object.assign({}, DEFAULT_SETTINGS.terms,    this.settings.terms);
         this.settings.pdfOutline = Object.assign({}, DEFAULT_PDF_OUTLINE_SETTINGS, this.settings.pdfOutline);
