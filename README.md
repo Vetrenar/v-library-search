@@ -21,13 +21,6 @@ It also ships a **PDF → card index** tool that builds one note per PDF, with t
 
 ---
 
-## Screenshots
-
-<!-- Add screenshots/GIFs here. -->
-- `<screenshot: inline panel on a note>`
-- `<screenshot: settings — tabbed layout>`
-- `<screenshot: PDF outline written into a card>`
-
 ---
 
 ## Installation
@@ -38,7 +31,7 @@ Search for **Library Search** in *Settings → Community plugins → Browse*, in
 
 ### Manually
 1. Download `main.js`, `manifest.json`, and `styles.css` from the https://github.com/Vetrenar/v-library-search/releases.
-2. Copy them into `<your-vault>/.obsidian/plugins/<plugin-id>/`.
+2. Copy them into `<your-vault>/.obsidian/plugins/library-search/`.
 3. Reload Obsidian and enable **Library Search** in *Settings → Community plugins*.
 
 ### With BRAT
